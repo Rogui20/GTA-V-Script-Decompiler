@@ -189,7 +189,7 @@ namespace Decompiler.Emitters
             string cond = ConvertExpression(node.Condition);
             string incr = ConvertStatement(node.Increment.ToString());
 
-            string pattern = @"^" + Regex.Escape(varName) + @"\s*<\s*(.+)$";
+            string pattern = @"^" + Regex.Escape(varName) + @"\s*(<|<=)\s*(.+)$";
             var mCond = Regex.Match(cond, pattern);
             if (!mCond.Success)
                 return false;
@@ -198,8 +198,10 @@ namespace Decompiler.Emitters
             if (!mIncr.Success)
                 return false;
 
-            string endExclusive = mCond.Groups[1].Value.Trim();
-            AppendLine(sb, indent, $"for {varName} = {startExpr}, {endExclusive} - 1 do");
+            string op = mCond.Groups[1].Value.Trim();
+            string endExclusive = mCond.Groups[2].Value.Trim();
+            string endExpr = op == "<=" ? endExclusive : $"{endExclusive} - 1";
+            AppendLine(sb, indent, $"for {varName} = {startExpr}, {endExpr} do");
             EmitTreeBody(sb, node, indent + 1, false);
             AppendLine(sb, indent, "end");
             return true;
@@ -379,6 +381,7 @@ namespace Decompiler.Emitters
             output = output.Replace("->", ".");
             output = output.Replace("/*", "--").Replace("*/", "");
             output = output.Replace("(float)", "");
+            output = Regex.Replace(output, @"RefGet\(([^)]+)\)\s*=\s*(.+)$", "RefSet($1, $2)");
             return output;
         }
 
