@@ -337,10 +337,78 @@ namespace Decompiler.Emitters
         private static string ConvertMemoryModel(string input)
         {
             string output = input;
+            output = ReplacePointerAssignments(output);
+            output = ReplacePointerReads(output);
             output = Regex.Replace(output, @"&\(([^)]+)\)", m => ConvertRefExpression(m.Groups[1].Value));
             output = ReplaceMemoryRefs(output, true);
             output = ReplaceMemoryRefs(output, false);
             return output;
+        }
+
+        private static string ReplacePointerAssignments(string input)
+        {
+            string output = input;
+
+            // uParam0->f_1.f_2[expr /*stride*/] = value  => RefSet(uParam0, value, offsetExpr)
+            output = Regex.Replace(output, @"\b([A-Za-z_]\w*)->((?:f_\d+\.)*f_\d+)(\[[^\]]+\])?\s*=\s*(.+)$", m =>
+            {
+                string ptr = m.Groups[1].Value;
+                string fields = m.Groups[2].Value;
+                string arr = m.Groups[3].Value;
+                string value = m.Groups[4].Value;
+                string offset = BuildOffsetExpr(fields, arr);
+                return $"RefSet({ptr}, {value}, {offset})";
+            });
+
+            // *uParam0 = value  => RefSet(uParam0, value)
+            output = Regex.Replace(output, @"^\*([A-Za-z_]\w*)\s*=\s*(.+)$", "RefSet($1, $2)");
+            return output;
+        }
+
+        private static string ReplacePointerReads(string input)
+        {
+            string output = input;
+            // uParam0->f_1.f_2[expr] => RefGet(uParam0, offsetExpr)
+            output = Regex.Replace(output, @"\b([A-Za-z_]\w*)->((?:f_\d+\.)*f_\d+)(\[[^\]]+\])?", m =>
+            {
+                string ptr = m.Groups[1].Value;
+                string fields = m.Groups[2].Value;
+                string arr = m.Groups[3].Value;
+                string offset = BuildOffsetExpr(fields, arr);
+                return $"RefGet({ptr}, {offset})";
+            });
+
+            // *uParam0 => RefGet(uParam0)
+            output = Regex.Replace(output, @"\*([A-Za-z_]\w+)", "RefGet($1)");
+            return output;
+        }
+
+        private static string BuildOffsetExpr(string fields, string arr)
+        {
+            int sum = 0;
+            foreach (Match fm in Regex.Matches(fields, @"f_(\d+)"))
+                sum += int.Parse(fm.Groups[1].Value);
+            string expr = sum.ToString();
+            if (!string.IsNullOrEmpty(arr))
+            {
+                var am = Regex.Match(arr, @"\[(.*?)\]");
+                if (am.Success)
+                {
+                    string inside = am.Groups[1].Value.Trim();
+                    var sm = Regex.Match(inside, @"^(.*?)\s*/\*\s*(\d+)\s*\*/\s*$");
+                    if (sm.Success)
+                    {
+                        string idx = sm.Groups[1].Value.Trim();
+                        string stride = sm.Groups[2].Value.Trim();
+                        expr += $" + ({idx} * {stride})";
+                    }
+                    else
+                    {
+                        expr += $" + {inside}";
+                    }
+                }
+            }
+            return expr;
         }
 
         private static string ConvertRefExpression(string inner)
@@ -481,6 +549,16 @@ namespace Decompiler.Emitters
             sb.AppendLine();
             sb.AppendLine("function GlobalRef(index)");
             sb.AppendLine("    return { get = function() return Global[index] end, set = function(value) Global[index] = value end, index = index, mem = Global }");
+            sb.AppendLine("end");
+            sb.AppendLine();
+            sb.AppendLine("function RefGet(ref, offset)");
+            sb.AppendLine("    offset = offset or 0");
+            sb.AppendLine("    return ref.mem[ref.index + offset]");
+            sb.AppendLine("end");
+            sb.AppendLine();
+            sb.AppendLine("function RefSet(ref, value, offset)");
+            sb.AppendLine("    offset = offset or 0");
+            sb.AppendLine("    ref.mem[ref.index + offset] = value");
             sb.AppendLine("end");
             sb.AppendLine();
         }
