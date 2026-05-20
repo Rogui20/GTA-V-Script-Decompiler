@@ -69,17 +69,17 @@ namespace Decompiler
 		{
 			if (opts.Recursive)
 			{
-				BatchDecompile(opts.FileName, !opts.DontExtractNativeTables, opts.Verbose);
+				BatchDecompile(opts.FileName, !opts.DontExtractNativeTables, opts.Verbose, opts.Lua);
 			}
 			else
 			{
-				Decompile(opts.FileName, !opts.DontExtractNativeTables, opts.Verbose);
+				Decompile(opts.FileName, !opts.DontExtractNativeTables, opts.Verbose, opts.Lua);
 			}
 
 			Console.WriteLine("All done & saved!");
 		}
 
-		static void Decompile(string fileName, bool extractNativeTables, bool verbose)
+		static void Decompile(string fileName, bool extractNativeTables, bool verbose, bool emitLua)
 		{
 			ScriptFile fileopen;
 			var Start = DateTime.Now;
@@ -108,10 +108,10 @@ namespace Decompiler
 			ExtractNativeTables(fileName, fileopen);
 
 			Console.WriteLine("Decompiled in " + (DateTime.Now - Start).ToString());
-			fileopen.Save(File.OpenWrite(fileName + ".c"), true);
+			fileopen.Save(File.OpenWrite(fileName + (emitLua ? ".lua" : ".c")), true, emitLua);
 		}
 
-		static void BatchDecompile(string dirPath, bool extractNativeTables, bool verbose)
+		static void BatchDecompile(string dirPath, bool extractNativeTables, bool verbose, bool emitLua)
 		{
 			Queue<string> CompileList = new Queue<string>();
 
@@ -193,7 +193,7 @@ namespace Decompiler
 					{
 						ExtractNativeTables(Path.Combine(saveDirectory, Path.GetFileNameWithoutExtension(scriptToDecode)), fileopen);
 					}
-					fileopen.Save(Path.Combine(saveDirectory, Path.GetFileNameWithoutExtension(scriptToDecode) + ".c"));
+					fileopen.Save(Path.Combine(saveDirectory, Path.GetFileNameWithoutExtension(scriptToDecode) + (emitLua ? ".lua" : ".c")), emitLua);
 					fileopen.Close();
 				}
 				catch (Exception ex)
