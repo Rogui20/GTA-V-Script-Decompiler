@@ -241,6 +241,25 @@ namespace Decompiler.Emitters
                 return;
             }
 
+            if (ret.ReturnValues.Count == 1 && ret.function.NumReturns > 1)
+            {
+                string baseExpr = ConvertExpression(ret.ReturnValues[0]);
+                var memMatch = Regex.Match(baseExpr, @"^(Local|Global)\[(.+)\]$");
+                if (memMatch.Success)
+                {
+                    string mem = memMatch.Groups[1].Value;
+                    string idx = memMatch.Groups[2].Value;
+                    List<string> vals = new();
+                    for (int i = 0; i < ret.function.NumReturns; i++)
+                    {
+                        vals.Add(i == 0 ? $"{mem}[{idx}]" : $"{mem}[{idx} + {i}]");
+                    }
+
+                    AppendLine(sb, indent, $"return {string.Join(", ", vals)}");
+                    return;
+                }
+            }
+
             StringBuilder values = new();
             var first = true;
             foreach (var v in ret.ReturnValues)
@@ -339,6 +358,8 @@ namespace Decompiler.Emitters
             string output = input;
             output = ReplacePointerAssignments(output);
             output = ReplacePointerReads(output);
+            output = Regex.Replace(output, @"&\s*Local\[(.+?)\]", "LocalRef($1)");
+            output = Regex.Replace(output, @"&\s*Global\[(.+?)\]", "GlobalRef($1)");
             output = Regex.Replace(output, @"&\(([^)]+)\)", m => ConvertRefExpression(m.Groups[1].Value));
             output = ReplaceMemoryRefs(output, true);
             output = ReplaceMemoryRefs(output, false);
@@ -413,7 +434,8 @@ namespace Decompiler.Emitters
 
         private static string ConvertRefExpression(string inner)
         {
-            string mem = ReplaceMemoryRefs(inner, true);
+            string mem = inner.Trim();
+            mem = ReplaceMemoryRefs(mem, true);
             mem = ReplaceMemoryRefs(mem, false);
             var ml = Regex.Match(mem, @"^Local\[(.+)\]$");
             if (ml.Success)
@@ -427,37 +449,45 @@ namespace Decompiler.Emitters
         private static string ReplaceMemoryRefs(string input, bool local)
         {
             string prefix = local ? "Local" : "Global";
-            string pat = local ? @"\b[a-zA-Z]+Local_(\d+)((?:\.f_\d+)*)((?:\[[^\]]+\])?)" : @"\bGlobal_(\d+)((?:\.f_\d+)*)((?:\[[^\]]+\])?)";
+            string pat = local
+                ? @"\b[a-zA-Z]+Local_(\d+)(\[[^\]]+\])?((?:\.f_\d+)*)(\[[^\]]+\])?"
+                : @"\bGlobal_(\d+)(\[[^\]]+\])?((?:\.f_\d+)*)(\[[^\]]+\])?";
             return Regex.Replace(input, pat, m =>
             {
                 int baseIdx = int.Parse(m.Groups[1].Value);
                 int sum = baseIdx;
-                foreach (Match fm in Regex.Matches(m.Groups[2].Value, @"\.f_(\d+)"))
+                foreach (Match fm in Regex.Matches(m.Groups[3].Value, @"\.f_(\d+)"))
                     sum += int.Parse(fm.Groups[1].Value);
 
                 string expr = sum.ToString();
-                string arr = m.Groups[3].Value;
-                if (!string.IsNullOrEmpty(arr))
+                string arr1 = m.Groups[2].Value;
+                string arr2 = m.Groups[4].Value;
+                if (!string.IsNullOrEmpty(arr1))
                 {
-                    var am = Regex.Match(arr, @"\[(.*?)\]");
-                    if (am.Success)
-                    {
-                        string inside = am.Groups[1].Value.Trim();
-                        var sm = Regex.Match(inside, @"^(.*?)\s*/\*\s*(\d+)\s*\*/\s*$");
-                        if (sm.Success)
-                        {
-                            string idx = sm.Groups[1].Value.Trim();
-                            string stride = sm.Groups[2].Value.Trim();
-                            expr += $" + ({idx} * {stride})";
-                        }
-                        else
-                        {
-                            expr += $" + {inside}";
-                        }
-                    }
+                    expr += ConvertArrayIndexToOffset(arr1);
+                }
+                if (!string.IsNullOrEmpty(arr2))
+                {
+                    expr += ConvertArrayIndexToOffset(arr2);
                 }
                 return $"{prefix}[{expr}]";
             });
+        }
+
+        private static string ConvertArrayIndexToOffset(string arrToken)
+        {
+            var am = Regex.Match(arrToken, @"\[(.*?)\]");
+            if (!am.Success)
+                return "";
+            string inside = am.Groups[1].Value.Trim();
+            var sm = Regex.Match(inside, @"^(.*?)\s*/\*\s*(\d+)\s*\*/\s*$");
+            if (sm.Success)
+            {
+                string idx = sm.Groups[1].Value.Trim();
+                string stride = sm.Groups[2].Value.Trim();
+                return $" + ({idx} * {stride})";
+            }
+            return $" + {inside}";
         }
 
         private void EmitFunctionLocals(StringBuilder sb, Function func, int indent)
@@ -500,15 +530,17 @@ namespace Decompiler.Emitters
             var values = valsObj as List<AstToken>;
 
             string? baseExpr = TryGetMemoryBaseIndex(ptr);
-            string valueExpr = values != null && values.Count == 1 ? ConvertExpression(values[0]) : ConvertStatement(storeN.ToString());
+            string valueExpr = values != null && values.Count > 0
+                ? string.Join(", ", values.ConvertAll(ConvertExpression))
+                : ConvertStatement(storeN.ToString());
             string? countExpr = cnt != null ? ConvertExpressionFromObject(cnt) : null;
 
             if (baseExpr == null)
                 return $"-- TODO StoreN unsupported: ptr={ptr?.GetType().Name}, count={countExpr}, text={storeN}";
 
             if (!string.IsNullOrWhiteSpace(countExpr))
-                return $"StructAssign(Local, {baseExpr}, {valueExpr}, {countExpr})";
-            return $"StructAssign(Local, {baseExpr}, {valueExpr})";
+                return $"StoreN(Local, {baseExpr}, {countExpr}, {valueExpr})";
+            return $"-- TODO StoreN unsupported: ptr={ptr?.GetType().Name}, count=<null>, text={storeN}";
         }
 
         private static string ConvertDrop(Drop drop)
@@ -542,6 +574,13 @@ namespace Decompiler.Emitters
 
         private static void EmitRuntimeHelpers(StringBuilder sb)
         {
+            sb.AppendLine("function StoreN(mem, base, count, ...)");
+            sb.AppendLine("    local values = {...}");
+            sb.AppendLine("    for i = 1, count do");
+            sb.AppendLine("        mem[base + (i - 1)] = values[i]");
+            sb.AppendLine("    end");
+            sb.AppendLine("end");
+            sb.AppendLine();
             sb.AppendLine("function StructAssign(mem, base, value, count)");
             sb.AppendLine("    if type(value) == \"table\" then");
             sb.AppendLine("        for k, v in pairs(value) do");
