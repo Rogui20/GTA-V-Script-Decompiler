@@ -1,7 +1,8 @@
 using Decompiler.Ast;
 using Decompiler.Ast.StatementTree;
 using System;
-using System.Linq;
+using System.Collections.Generic;
+using System.Reflection;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -19,7 +20,7 @@ namespace Decompiler.Emitters
         public string EmitFunction(Function func)
         {
             StringBuilder sb = new();
-            sb.AppendLine($"function {func.Name}()");
+            sb.AppendLine($"function {func.Name}()") ;
             EmitFunctionLocals(sb, func, 1);
             EmitTreeBody(sb, func.MainTree, 1, false);
             sb.AppendLine("end");
@@ -32,6 +33,7 @@ namespace Decompiler.Emitters
             sb.AppendLine("Local = Local or {}");
             sb.AppendLine("Global = Global or {}");
             sb.AppendLine();
+            EmitRuntimeHelpers(sb);
 
             // Script-level locals are emitted at the top so Lua output keeps variable context
             // similar to the current C-like output and can be expanded later for richer mappings.
@@ -209,8 +211,14 @@ namespace Decompiler.Emitters
                 case LocalStore or StaticStore or GlobalStore or ArrayStore or OffsetStore or Store:
                     AppendLine(sb, indent, ConvertStatement(token.ToString()));
                     break;
+                case StoreN storeN:
+                    AppendLine(sb, indent, ConvertStoreN(storeN));
+                    break;
                 case NativeCall nativeCall when nativeCall.IsStatement():
                     AppendLine(sb, indent, ConvertNativeStatement(nativeCall));
+                    break;
+                case Drop drop:
+                    AppendLine(sb, indent, ConvertDrop(drop));
                     break;
                 case Break:
                     if (!insideSwitchCase)
@@ -329,10 +337,23 @@ namespace Decompiler.Emitters
         private static string ConvertMemoryModel(string input)
         {
             string output = input;
-            output = Regex.Replace(output, @"&\(([^)]+)\)", "$1");
+            output = Regex.Replace(output, @"&\(([^)]+)\)", m => ConvertRefExpression(m.Groups[1].Value));
             output = ReplaceMemoryRefs(output, true);
             output = ReplaceMemoryRefs(output, false);
             return output;
+        }
+
+        private static string ConvertRefExpression(string inner)
+        {
+            string mem = ReplaceMemoryRefs(inner, true);
+            mem = ReplaceMemoryRefs(mem, false);
+            var ml = Regex.Match(mem, @"^Local\[(.+)\]$");
+            if (ml.Success)
+                return $"LocalRef({ml.Groups[1].Value})";
+            var mg = Regex.Match(mem, @"^Global\[(.+)\]$");
+            if (mg.Success)
+                return $"GlobalRef({mg.Groups[1].Value})";
+            return mem;
         }
 
         private static string ReplaceMemoryRefs(string input, bool local)
@@ -384,8 +405,84 @@ namespace Decompiler.Emitters
                     continue;
                 AppendLine(sb, indent, $"local {name}");
             }
-            if (func.Vars.GetDeclaration().Count() > 0)
+            if (func.Vars.GetDeclaration().Count > 0)
                 sb.AppendLine();
+        }
+
+        private static string ConvertStoreN(StoreN storeN)
+        {
+            object? ptr = GetPrivateField(storeN, "Pointer");
+            object? cnt = GetPrivateField(storeN, "Count");
+            object? valsObj = GetPrivateField(storeN, "Values");
+            var values = valsObj as List<AstToken>;
+
+            string? baseExpr = TryGetMemoryBaseIndex(ptr);
+            string valueExpr = values != null && values.Count == 1 ? ConvertExpression(values[0]) : ConvertStatement(storeN.ToString());
+            string? countExpr = cnt != null ? ConvertExpressionFromObject(cnt) : null;
+
+            if (baseExpr == null)
+                return $"-- TODO StoreN unsupported: ptr={ptr?.GetType().Name}, count={countExpr}, text={storeN}";
+
+            if (!string.IsNullOrWhiteSpace(countExpr))
+                return $"StructAssign(Local, {baseExpr}, {valueExpr}, {countExpr})";
+            return $"StructAssign(Local, {baseExpr}, {valueExpr})";
+        }
+
+        private static string ConvertDrop(Drop drop)
+        {
+            object? dropped = GetPrivateField(drop, "Dropped");
+            if (dropped is AstToken tok)
+                return ConvertStatement(tok.ToString());
+            return $"-- TODO Drop unsupported: dropped={dropped?.GetType().FullName}, text={drop}";
+        }
+
+        private static object? GetPrivateField(object obj, string field)
+        {
+            return obj.GetType().GetField(field, BindingFlags.Instance | BindingFlags.NonPublic)?.GetValue(obj);
+        }
+
+        private static string? TryGetMemoryBaseIndex(object? pointerObj)
+        {
+            if (pointerObj is not AstToken ptr)
+                return null;
+            string mem = ReplaceMemoryRefs(ptr.ToString(), true);
+            var m = Regex.Match(mem, @"^Local\[(.+)\]$");
+            return m.Success ? m.Groups[1].Value : null;
+        }
+
+        private static string ConvertExpressionFromObject(object obj)
+        {
+            if (obj is AstToken tok)
+                return ConvertExpression(tok);
+            return obj.ToString() ?? "";
+        }
+
+        private static void EmitRuntimeHelpers(StringBuilder sb)
+        {
+            sb.AppendLine("function StructAssign(mem, base, value, count)");
+            sb.AppendLine("    if type(value) == \"table\" then");
+            sb.AppendLine("        for k, v in pairs(value) do");
+            sb.AppendLine("            if type(k) == \"number\" then");
+            sb.AppendLine("                mem[base + k] = v");
+            sb.AppendLine("            else");
+            sb.AppendLine("                mem[base] = mem[base] or {}");
+            sb.AppendLine("                mem[base][k] = v");
+            sb.AppendLine("            end");
+            sb.AppendLine("        end");
+            sb.AppendLine("    else");
+            sb.AppendLine("        mem[base] = value");
+            sb.AppendLine("    end");
+            sb.AppendLine("    return value");
+            sb.AppendLine("end");
+            sb.AppendLine();
+            sb.AppendLine("function LocalRef(index)");
+            sb.AppendLine("    return { get = function() return Local[index] end, set = function(value) Local[index] = value end, index = index, mem = Local }");
+            sb.AppendLine("end");
+            sb.AppendLine();
+            sb.AppendLine("function GlobalRef(index)");
+            sb.AppendLine("    return { get = function() return Global[index] end, set = function(value) Global[index] = value end, index = index, mem = Global }");
+            sb.AppendLine("end");
+            sb.AppendLine();
         }
 
         private static void AppendLine(StringBuilder sb, int indent, string text)
