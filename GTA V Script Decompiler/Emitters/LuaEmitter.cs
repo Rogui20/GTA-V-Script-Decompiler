@@ -271,7 +271,7 @@ namespace Decompiler.Emitters
                     EmitReturn(sb, ret, indent);
                     break;
                 case LocalStore or StaticStore or GlobalStore or ArrayStore or OffsetStore or Store:
-                    AppendLine(sb, indent, ConvertStatement(token.ToString()));
+                    AppendConvertedStatement(sb, indent, token.ToString());
                     break;
                 case StoreN storeN:
                     AppendLine(sb, indent, ConvertStoreN(storeN));
@@ -287,7 +287,7 @@ namespace Decompiler.Emitters
                         AppendLine(sb, indent, "break");
                     break;
                 case FunctionCallBase call when call.IsStatement():
-                    AppendLine(sb, indent, ConvertStatement(call.ToString()));
+                    AppendConvertedStatement(sb, indent, call.ToString());
                     break;
                 default:
                     AppendLine(sb, indent, $"-- TODO unsupported token: {token.GetType().FullName}");
@@ -335,6 +335,14 @@ namespace Decompiler.Emitters
             AppendLine(sb, indent, $"return {values}");
         }
 
+        private void AppendConvertedStatement(StringBuilder sb, int indent, string statement)
+        {
+            string converted = ConvertStatement(statement);
+            if (converted.StartsWith("-- ignored no-op memory read:", StringComparison.Ordinal))
+                skippedStatements++;
+            AppendLine(sb, indent, converted);
+        }
+
         private static string ConvertNativeStatement(NativeCall call)
         {
             string c = call.ToString();
@@ -366,6 +374,8 @@ namespace Decompiler.Emitters
             var converted = NormalizeResolvedArtifacts(ConvertMemoryModel(ConvertOperators(ConvertFloatLiterals(ConvertNamespaces(statement.TrimEnd(';'))))));
             if (IsNoOpExpressionStatement(converted))
             {
+                if (Regex.IsMatch(converted, @"^(Local\[.+\]|Global\[.+\]|RefGet\(.+\)|\w+\[\d+.*\])$"))
+                    return $"-- ignored no-op memory read: {converted}";
                 if (converted.Contains("==") || converted.Contains("~=") || converted.Contains(" < ") || converted.Contains(" > ") || converted.Contains("<=") || converted.Contains(">="))
                     return $"-- ignored no-op comparison: {converted}";
                 return $"-- ignored no-op expression: {converted}";
@@ -386,6 +396,8 @@ namespace Decompiler.Emitters
                 return false;
             if (Regex.IsMatch(s, @"^[A-Za-z_][A-Za-z0-9_\.]*\s*\(.*\)$"))
                 return false; // standalone call can have side-effects.
+            if (Regex.IsMatch(s, @"^Local\[.+\]$") || Regex.IsMatch(s, @"^Global\[.+\]$") || Regex.IsMatch(s, @"^RefGet\(.+\)$") || Regex.IsMatch(s, @"^\w+\[\d+.*\]$"))
+                return true;
 
             // Pure expression operators / comparisons that are invalid as standalone Lua statements.
             if (s.Contains("==") || s.Contains("~=") || s.Contains("<=") || s.Contains(">=") || s.Contains(" < ") || s.Contains(" > ")
@@ -450,7 +462,7 @@ namespace Decompiler.Emitters
         {
             string output = input;
             output = ResolveComplexMemoryAccesses(output);
-            output = ReplacePointerAssignments(output);
+            output = ResolveMemoryAssignment(output);
             output = ReplacePointerReads(output);
             output = Regex.Replace(output, @"&\s*Local\[(.+?)\]", "LocalRef($1)");
             output = Regex.Replace(output, @"&\s*Global\[(.+?)\]", "GlobalRef($1)");
@@ -468,8 +480,28 @@ namespace Decompiler.Emitters
             output = Regex.Replace(output, @"BUILTIN\.VDIST2?\(([^,]+),\s*([^)]+)\)", "BUILTIN.VDIST($1, $2)");
             output = output.Replace("/*", "--").Replace("*/", "");
             output = output.Replace("(float)", "");
-            output = Regex.Replace(output, @"RefGet\(([^)]+)\)\s*=\s*(.+)$", "RefSet($1, $2)");
             return output;
+        }
+
+        private static string ResolveMemoryAssignment(string input)
+        {
+            var m = Regex.Match(input, @"^\s*(.+?)\s*(?<![=!<>])=(?!=)\s*(.+)\s*$");
+            if (!m.Success)
+                return ReplacePointerAssignments(input);
+
+            string left = m.Groups[1].Value.Trim();
+            string right = m.Groups[2].Value.Trim();
+            if (TryResolveMemoryAddress(left) is MemoryAddress addr)
+            {
+                return addr.Kind switch
+                {
+                    MemoryKind.Ref => $"RefSet({addr.BaseName}, {right}, {addr.OffsetExpr.TrimStart('+', ' ')})",
+                    MemoryKind.Local => $"Local[{addr.OffsetExpr}] = {right}",
+                    MemoryKind.Global => $"Global[{addr.OffsetExpr}] = {right}",
+                    _ => ReplacePointerAssignments(input)
+                };
+            }
+            return ReplacePointerAssignments(input);
         }
 
         private static string ResolveComplexMemoryAccesses(string input)
@@ -582,6 +614,8 @@ namespace Decompiler.Emitters
 
         private static string ConvertInlineArrayIndex(string inside)
         {
+            if (Regex.IsMatch(inside.Trim(), @"^[A-Za-z_]\w*$"))
+                return inside.Trim();
             var sm = Regex.Match(inside, @"^(.*?)\s*/\*\s*(\d+)\s*\*/\s*$");
             if (sm.Success)
             {
@@ -740,6 +774,14 @@ namespace Decompiler.Emitters
             if (baseExpr == null && ptr?.GetType().Name == "Array")
             {
                 var text = storeN.ToString();
+                var mRefArr = Regex.Match(text, @"^([A-Za-z_]\w+)\.f_(\d+)\[(.*?)\]\s*=\s*\{\s*(.+?)\s*\};$");
+                if (mRefArr.Success && !string.IsNullOrWhiteSpace(countExpr))
+                {
+                    string idx = ConvertInlineArrayIndex(mRefArr.Groups[3].Value);
+                    string off = $"{mRefArr.Groups[2].Value} + ({idx})";
+                    string val = ConvertStoreNValue(mRefArr.Groups[4].Value, countExpr);
+                    return $"StoreNRef({mRefArr.Groups[1].Value}, {off}, {countExpr}, {val})";
+                }
                 var m = Regex.Match(text, @"\b([a-zA-Z]+Local_(\d+)|Global_(\d+))((?:\.f_\d+)*)(\[[^\]]+\])\s*=\s*\{\s*(.+?)\s*\};$");
                 if (m.Success)
                 {
@@ -792,10 +834,14 @@ namespace Decompiler.Emitters
             }
 
             if (baseExpr == null)
+            {
+                errorCount++;
                 return $"-- TODO StoreN unsupported: ptr={ptr?.GetType().Name}, count={countExpr}, text={SanitizeTodoText(storeN.ToString())}";
+            }
 
             if (!string.IsNullOrWhiteSpace(countExpr))
                 return $"StoreN(Local, {baseExpr}, {countExpr}, {valueExpr})";
+            errorCount++;
             return $"-- TODO StoreN unsupported: ptr={ptr?.GetType().Name}, count=<null>, text={SanitizeTodoText(storeN.ToString())}";
         }
 
@@ -1204,6 +1250,9 @@ namespace Decompiler.Emitters
         private static string NormalizeResolvedArtifacts(string input)
         {
             string o = input;
+            o = Regex.Replace(o, @"RefGet\(Global\[(.*?)\]\)\.f_(\d+)", m => $"Global[{m.Groups[1].Value} + {m.Groups[2].Value}]");
+            o = Regex.Replace(o, @"Global\[(.*?)\]\.RefSet\(([^,]+),\s*(.+?),\s*(.+?)\)", m => $"Global[{m.Groups[1].Value} + {m.Groups[2].Value} + {m.Groups[3].Value}] = {m.Groups[4].Value}");
+            o = Regex.Replace(o, @"Global\[(.*?)\]\.RefGet\(([^,]+),\s*(.+?)\)", m => $"Global[{m.Groups[1].Value} + {m.Groups[2].Value} + {m.Groups[3].Value}]");
             o = Regex.Replace(o, @"\b([A-Za-z_]\w+)\.f_(\d+)\[(.*?)\]", m => $"{m.Groups[1].Value}[{m.Groups[2].Value} + {ConvertInlineArrayIndex(m.Groups[3].Value)}]");
             o = Regex.Replace(o, @"\b([A-Za-z_]\w+)\.f_(\d+)", "$1[$2]");
             o = Regex.Replace(o, @"Global\[([^\]]+)\]\.f_(\d+)\[(.*?)\]", m => $"Global[{m.Groups[1].Value} + {m.Groups[2].Value} + {ConvertInlineArrayIndex(m.Groups[3].Value)}]");
@@ -1213,8 +1262,10 @@ namespace Decompiler.Emitters
             o = Regex.Replace(o, @"RefGet\(([^\)]*)\)\.f_(\d+)\[(.*?)\]", m => $"RefGet({m.Groups[1].Value}, {m.Groups[2].Value} + {ConvertInlineArrayIndex(m.Groups[3].Value)})");
             o = Regex.Replace(o, @"RefGet\(([^\)]*)\)\[(.*?)\]", m => $"RefGet({m.Groups[1].Value}, {ConvertInlineArrayIndex(m.Groups[2].Value)})");
             o = Regex.Replace(o, @"RefGet\(([^\)]*),\s*([^\)]*)\)\.f_(\d+)\[(.*?)\]", m => $"RefGet({m.Groups[1].Value}, {m.Groups[2].Value} + {m.Groups[3].Value} + {ConvertInlineArrayIndex(m.Groups[4].Value)})");
+            o = Regex.Replace(o, @"VarRef\(function\(\) return RefGet end, function\(v\) RefGet = v end\)\(([^,]+),\s*(.+?)\)", m => $"RefAt({m.Groups[1].Value}, {m.Groups[2].Value})");
             o = Regex.Replace(o, @"VarRef\(function\(\) return ([A-Za-z_]\w+) end, function\(v\) \1 = v end\)\.f_(\d+)\[(.*?)\]", m => $"StructRef({m.Groups[1].Value}, {m.Groups[2].Value} + {ConvertInlineArrayIndex(m.Groups[3].Value)})");
             o = Regex.Replace(o, @"VarRef\(function\(\) return ([A-Za-z_]\w+) end, function\(v\) \1 = v end\)\.f_(\d+)", "StructRef($1, $2)");
+            o = Regex.Replace(o, @"Vec3\(VecUnpack\((0(?:\.0)?),\s*(0(?:\.0)?),\s*(0(?:\.0)?)\)\)", "Vec3($1, $2, $3)");
             return o;
         }
         private static string[] BuildWarnings(string text)
