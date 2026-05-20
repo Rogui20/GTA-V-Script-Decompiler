@@ -2,6 +2,7 @@ using Decompiler.Ast;
 using Decompiler.Ast.StatementTree;
 using System;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace Decompiler.Emitters
 {
@@ -24,6 +25,19 @@ namespace Decompiler.Emitters
         public string EmitScript(ScriptFile file)
         {
             StringBuilder sb = new();
+
+            // Script-level locals are emitted at the top so Lua output keeps variable context
+            // similar to the current C-like output and can be expanded later for richer mappings.
+            if (file.Header.StaticsCount > 0)
+            {
+                foreach (var declaration in file.Statics.GetDeclaration())
+                {
+                    sb.AppendLine(ConvertStaticDeclaration(declaration));
+                }
+
+                sb.AppendLine();
+            }
+
             foreach (var func in file.Functions)
             {
                 sb.AppendLine(EmitFunction(func));
@@ -101,6 +115,9 @@ namespace Decompiler.Emitters
                 case NativeCall nativeCall when nativeCall.IsStatement():
                     AppendLine(sb, indent, ConvertNativeStatement(nativeCall));
                     break;
+                case Break:
+                    AppendLine(sb, indent, "break");
+                    break;
                 case FunctionCallBase call when call.IsStatement():
                     AppendLine(sb, indent, ConvertStatement(call.ToString()));
                     break;
@@ -137,7 +154,7 @@ namespace Decompiler.Emitters
             int paren = c.IndexOf('(');
             string argsPart = paren >= 0 ? c.Substring(paren) : "()";
             string name = call.Name.Replace("::", ".").ToUpperInvariant();
-            return ConvertStatement($"NATIVE.{name}{argsPart}");
+            return ConvertStatement($"{name}{argsPart}");
         }
 
         private static string ConvertExpression(AstToken token)
@@ -145,7 +162,7 @@ namespace Decompiler.Emitters
             string value = token is NativeCall native
                 ? ConvertNativeExpression(native)
                 : token.ToString();
-            return ConvertOperators(value.TrimEnd(';'));
+            return ConvertOperators(ConvertFloatLiterals(value.TrimEnd(';')));
         }
 
         private static string ConvertNativeExpression(NativeCall call)
@@ -154,12 +171,34 @@ namespace Decompiler.Emitters
             int paren = c.IndexOf('(');
             string argsPart = paren >= 0 ? c.Substring(paren) : "()";
             string name = call.Name.Replace("::", ".").ToUpperInvariant();
-            return $"NATIVE.{name}{argsPart}";
+            return $"{name}{argsPart}";
         }
 
         private static string ConvertStatement(string statement)
         {
-            return ConvertOperators(statement.TrimEnd(';'));
+            return ConvertOperators(ConvertFloatLiterals(statement.TrimEnd(';')));
+        }
+
+        private static string ConvertStaticDeclaration(string declaration)
+        {
+            string line = declaration.Trim().TrimEnd(';');
+            int eq = line.IndexOf(" = ", StringComparison.Ordinal);
+            if (eq < 0)
+                return $"-- TODO unsupported token: static declaration {line}";
+
+            string left = line.Substring(0, eq).Trim();
+            string right = line[(eq + 3)..].Trim();
+
+            int lastSpace = left.LastIndexOf(' ');
+            string varName = lastSpace >= 0 ? left[(lastSpace + 1)..] : left;
+
+            string value = ConvertStatement(right);
+            if (left.StartsWith("char*", StringComparison.OrdinalIgnoreCase) && value == "0")
+                value = "nil";
+            else if ((left.StartsWith("BOOL", StringComparison.OrdinalIgnoreCase) || left.StartsWith("bool", StringComparison.OrdinalIgnoreCase)) && value is "0" or "1")
+                value = value == "1" ? "true" : "false";
+
+            return $"local {varName} = {value}";
         }
 
         private static string ConvertOperators(string input)
@@ -167,6 +206,13 @@ namespace Decompiler.Emitters
             string output = input.Replace("&&", "and").Replace("||", "or");
             output = output.Replace("!=", "~=");
             output = output.Replace("!", "not ");
+            return output;
+        }
+
+        private static string ConvertFloatLiterals(string input)
+        {
+            string output = Regex.Replace(input, @"(?<![\w.])(-?\d+\.\d+)f\b", "$1");
+            output = Regex.Replace(output, @"(?<![\w.])(-?\d+)f\b", "$1.0");
             return output;
         }
 
