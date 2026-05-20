@@ -13,11 +13,13 @@ namespace Decompiler.Emitters
     /// </summary>
     internal class LuaEmitter : IEmitter
     {
+        private int switchTempIndex = 0;
+
         public string EmitFunction(Function func)
         {
             StringBuilder sb = new();
             sb.AppendLine($"function {func.Name}()") ;
-            EmitTreeBody(sb, func.MainTree, 1);
+            EmitTreeBody(sb, func.MainTree, 1, false);
             sb.AppendLine("end");
             return sb.ToString();
         }
@@ -45,15 +47,15 @@ namespace Decompiler.Emitters
             return sb.ToString();
         }
 
-        private void EmitTreeBody(StringBuilder sb, Tree tree, int indent)
+        private void EmitTreeBody(StringBuilder sb, Tree tree, int indent, bool insideSwitchCase)
         {
             foreach (var statement in tree.Statements)
             {
-                EmitNode(sb, statement, indent);
+                EmitNode(sb, statement, indent, insideSwitchCase);
             }
         }
 
-        private void EmitNode(StringBuilder sb, object node, int indent)
+        private void EmitNode(StringBuilder sb, object node, int indent, bool insideSwitchCase)
         {
             switch (node)
             {
@@ -63,11 +65,17 @@ namespace Decompiler.Emitters
                 case While w:
                     EmitWhile(sb, w, indent);
                     break;
+                case Switch sw:
+                    EmitSwitch(sb, sw, indent);
+                    break;
+                case For f:
+                    EmitFor(sb, f, indent);
+                    break;
                 case AstToken token:
-                    EmitTokenStatement(sb, token, indent);
+                    EmitTokenStatement(sb, token, indent, insideSwitchCase);
                     break;
                 case Tree nested:
-                    EmitTreeBody(sb, nested, indent);
+                    EmitTreeBody(sb, nested, indent, insideSwitchCase);
                     break;
                 default:
                     AppendLine(sb, indent, $"-- TODO unsupported token: {node.GetType().FullName}");
@@ -78,18 +86,18 @@ namespace Decompiler.Emitters
         private void EmitIf(StringBuilder sb, If node, int indent)
         {
             AppendLine(sb, indent, $"if {ConvertExpression(node.Condition)} then");
-            EmitTreeBody(sb, node, indent + 1);
+            EmitTreeBody(sb, node, indent + 1, false);
 
             foreach (var elseIf in node.ElseIfTrees)
             {
                 AppendLine(sb, indent, $"elseif {ConvertExpression(elseIf.Condition)} then");
-                EmitTreeBody(sb, elseIf, indent + 1);
+                EmitTreeBody(sb, elseIf, indent + 1, false);
             }
 
             if (node.ElseTree != null)
             {
                 AppendLine(sb, indent, "else");
-                EmitTreeBody(sb, node.ElseTree, indent + 1);
+                EmitTreeBody(sb, node.ElseTree, indent + 1, false);
             }
 
             AppendLine(sb, indent, "end");
@@ -98,11 +106,97 @@ namespace Decompiler.Emitters
         private void EmitWhile(StringBuilder sb, While node, int indent)
         {
             AppendLine(sb, indent, $"while {ConvertExpression(node.Condition)} do");
-            EmitTreeBody(sb, node, indent + 1);
+            EmitTreeBody(sb, node, indent + 1, false);
             AppendLine(sb, indent, "end");
         }
 
-        private void EmitTokenStatement(StringBuilder sb, AstToken token, int indent)
+        private void EmitSwitch(StringBuilder sb, Switch node, int indent)
+        {
+            string tempVar = $"__switch_{switchTempIndex++}";
+            AppendLine(sb, indent, "do");
+            AppendLine(sb, indent + 1, $"local {tempVar} = {ConvertExpression(node.SwitchVal)}");
+
+            bool first = true;
+            Case? defaultCase = null;
+            foreach (var stmt in node.Statements)
+            {
+                if (stmt is not Case c)
+                    continue;
+
+                int caseCodeOffset = node.Function.FunctionOffsetToCodeOffset(c.StartOffset);
+                if (!node.Cases.TryGetValue(caseCodeOffset, out var caseLabels) || caseLabels.Count == 0)
+                    continue;
+                bool isDefault = caseLabels[0] is Default;
+
+                if (isDefault)
+                {
+                    defaultCase = c;
+                    continue;
+                }
+
+                // First label in case block drives the if/elseif guard.
+                AstToken firstLabel = caseLabels[0];
+                string guard = $"{tempVar} == {ConvertExpression(firstLabel)}";
+                AppendLine(sb, indent + 1, first ? $"if {guard} then" : $"elseif {guard} then");
+                EmitTreeBody(sb, c, indent + 2, true);
+                first = false;
+            }
+
+            if (defaultCase != null)
+            {
+                AppendLine(sb, indent + 1, first ? "if true then" : "else");
+                EmitTreeBody(sb, defaultCase, indent + 2, true);
+            }
+
+            if (!first || defaultCase != null)
+                AppendLine(sb, indent + 1, "end");
+            AppendLine(sb, indent, "end");
+        }
+
+        private void EmitFor(StringBuilder sb, For node, int indent)
+        {
+            if (TryEmitNumericFor(sb, node, indent))
+                return;
+
+            // Fallback safe lowering if we cannot infer Lua numeric-for shape.
+            AppendLine(sb, indent, "do");
+            AppendLine(sb, indent + 1, ConvertStatement(node.Initializer.ToString()));
+            AppendLine(sb, indent + 1, $"while {ConvertExpression(node.Condition)} do");
+            EmitTreeBody(sb, node, indent + 2, false);
+            AppendLine(sb, indent + 2, ConvertStatement(node.Increment.ToString()));
+            AppendLine(sb, indent + 1, "end");
+            AppendLine(sb, indent, "end");
+        }
+
+        private bool TryEmitNumericFor(StringBuilder sb, For node, int indent)
+        {
+            string init = ConvertStatement(node.Initializer.ToString());
+            var mInit = Regex.Match(init, @"^([A-Za-z_]\w*)\s*=\s*(.+)$");
+            if (!mInit.Success)
+                return false;
+
+            string varName = mInit.Groups[1].Value;
+            string startExpr = mInit.Groups[2].Value;
+            string cond = ConvertExpression(node.Condition);
+            string incr = ConvertStatement(node.Increment.ToString());
+
+            string pattern = @"^" + Regex.Escape(varName) + @"\s*<\s*(.+)$";
+            var mCond = Regex.Match(cond, pattern);
+            if (!mCond.Success)
+                return false;
+
+            var mIncr = Regex.Match(incr, @"^" + Regex.Escape(varName) + @"\s*=\s*" + Regex.Escape(varName) + @"\s*\+\s*1(\.0)?$");
+            if (!mIncr.Success)
+                return false;
+
+            string endExclusive = mCond.Groups[1].Value.Trim();
+            AppendLine(sb, indent, $"for {varName} = {startExpr}, {endExclusive} - 1 do");
+            EmitTreeBody(sb, node, indent + 1, false);
+            AppendLine(sb, indent, "end");
+            return true;
+        }
+
+        private void EmitTokenStatement(StringBuilder sb, AstToken token, int indent, bool insideSwitchCase)
         {
             switch (token)
             {
@@ -116,7 +210,8 @@ namespace Decompiler.Emitters
                     AppendLine(sb, indent, ConvertNativeStatement(nativeCall));
                     break;
                 case Break:
-                    AppendLine(sb, indent, "break");
+                    if (!insideSwitchCase)
+                        AppendLine(sb, indent, "break");
                     break;
                 case FunctionCallBase call when call.IsStatement():
                     AppendLine(sb, indent, ConvertStatement(call.ToString()));
@@ -162,7 +257,7 @@ namespace Decompiler.Emitters
             string value = token is NativeCall native
                 ? ConvertNativeExpression(native)
                 : token.ToString();
-            return ConvertOperators(ConvertFloatLiterals(value.TrimEnd(';')));
+            return ConvertOperators(ConvertFloatLiterals(ConvertNamespaces(value.TrimEnd(';'))));
         }
 
         private static string ConvertNativeExpression(NativeCall call)
@@ -176,7 +271,7 @@ namespace Decompiler.Emitters
 
         private static string ConvertStatement(string statement)
         {
-            return ConvertOperators(ConvertFloatLiterals(statement.TrimEnd(';')));
+            return ConvertOperators(ConvertFloatLiterals(ConvertNamespaces(statement.TrimEnd(';'))));
         }
 
         private static string ConvertStaticDeclaration(string declaration)
@@ -214,6 +309,11 @@ namespace Decompiler.Emitters
             string output = Regex.Replace(input, @"(?<![\w.])(-?\d+\.\d+)f\b", "$1");
             output = Regex.Replace(output, @"(?<![\w.])(-?\d+)f\b", "$1.0");
             return output;
+        }
+
+        private static string ConvertNamespaces(string input)
+        {
+            return input.Replace("::", ".");
         }
 
         private static void AppendLine(StringBuilder sb, int indent, string text)
