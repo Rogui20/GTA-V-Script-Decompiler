@@ -1,6 +1,7 @@
 using Decompiler.Ast;
 using Decompiler.Ast.StatementTree;
 using System;
+using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -18,7 +19,7 @@ namespace Decompiler.Emitters
         public string EmitFunction(Function func)
         {
             StringBuilder sb = new();
-            sb.AppendLine($"function {func.Name}()") ;
+            sb.AppendLine($"function {func.Name}()");
             EmitFunctionLocals(sb, func, 1);
             EmitTreeBody(sb, func.MainTree, 1, false);
             sb.AppendLine("end");
@@ -383,7 +384,7 @@ namespace Decompiler.Emitters
                     continue;
                 AppendLine(sb, indent, $"local {name}");
             }
-            if (func.Vars.GetDeclaration().Count > 0)
+            if (func.Vars.GetDeclaration().Count() > 0)
                 sb.AppendLine();
         }
 
