@@ -2,6 +2,7 @@ using Decompiler.Ast;
 using Decompiler.Ast.StatementTree;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -37,7 +38,7 @@ namespace Decompiler.Emitters
         public string EmitFunction(Function func)
         {
             StringBuilder sb = new();
-            sb.AppendLine($"function {func.Name}({GetFunctionParamList(func)})") ;
+            sb.AppendLine($"function {func.Name}({GetFunctionParamList(func)})");
             EmitFunctionLocals(sb, func, 1, analysis);
             EmitTreeBody(sb, func.MainTree, 1, false);
             sb.AppendLine("end");
@@ -490,13 +491,13 @@ namespace Decompiler.Emitters
             // uParam1->[i /*5*/].f_1 = v
             output = Regex.Replace(output, @"\b([A-Za-z_]\w*)->\[(.*?)\]\.f_(\d+)\s*(?<![=!<>])=(?!=)\s*(.+)$", m =>
             {
-                string ptr=m.Groups[1].Value; string idx=ConvertInlineArrayIndex(m.Groups[2].Value.Trim()); string f=m.Groups[3].Value; string v=m.Groups[4].Value;
+                string ptr = m.Groups[1].Value; string idx = ConvertInlineArrayIndex(m.Groups[2].Value.Trim()); string f = m.Groups[3].Value; string v = m.Groups[4].Value;
                 return $"RefSet({ptr}, {v}, ({idx}) + {f})";
             });
             // uParam1->f_221[i /*5*/].f_1 = v
             output = Regex.Replace(output, @"\b([A-Za-z_]\w*)->((?:f_\d+\.)*)\[(.*?)\]\.f_(\d+)\s*(?<![=!<>])=(?!=)\s*(.+)$", m =>
             {
-                string ptr=m.Groups[1].Value; string pre=m.Groups[2].Value; string idx=ConvertInlineArrayIndex(m.Groups[3].Value.Trim()); string f=m.Groups[4].Value; string v=m.Groups[5].Value;
+                string ptr = m.Groups[1].Value; string pre = m.Groups[2].Value; string idx = ConvertInlineArrayIndex(m.Groups[3].Value.Trim()); string f = m.Groups[4].Value; string v = m.Groups[5].Value;
                 string preOff = BuildOffsetExpr(pre + "f_0", "").Replace(" + 0", "").Trim();
                 string off = (preOff == "0" || preOff == "") ? idx : $"{preOff} + ({idx})";
                 return $"RefSet({ptr}, {v}, {off} + {f})";
@@ -602,7 +603,7 @@ namespace Decompiler.Emitters
             if (ptrAny.Success)
             {
                 string ptr = ptrAny.Groups[1].Value;
-                string fields = ptrAny.Groups[2].Success && ptrAny.Groups[2].Value.Length>0 ? ptrAny.Groups[2].Value : "f_0";
+                string fields = ptrAny.Groups[2].Success && ptrAny.Groups[2].Value.Length > 0 ? ptrAny.Groups[2].Value : "f_0";
                 string arr = ptrAny.Groups[3].Success ? ptrAny.Groups[3].Value : "";
                 string off = BuildOffsetExpr(fields, arr).Replace(" + 0", "").Trim();
                 if (ptrAny.Groups[4].Success) off += $" + {ptrAny.Groups[4].Value}";
@@ -688,7 +689,7 @@ namespace Decompiler.Emitters
                 }
                 AppendLine(sb, indent, $"local {name}");
             }
-            if (func.Vars.GetDeclaration().Count > 0)
+            if (func.Vars.GetDeclaration().Count() > 0)
                 sb.AppendLine();
         }
 
@@ -802,19 +803,27 @@ namespace Decompiler.Emitters
         {
             var c = (countExpr ?? "").Trim();
             var converted = ConvertStatement(expr);
+
             if (c == "3")
             {
+                if (vectorLocals.Contains(converted))
+                    return $"VecUnpack({converted})";
+
                 var mr = Regex.Match(converted, @"^RefGet\((.+)\)$");
                 if (mr.Success)
                     return $"RefN({mr.Groups[1].Value}, 0, 3)";
-                if (Regex.IsMatch(converted, @"^(Local|Global)\[.+\]$"))
-                    var mm = Regex.Match(converted, @"^(Local|Global)\[(.+)\]$");
-                    if (mm.Success)
-                        return $"{mm.Groups[1].Value}[{mm.Groups[2].Value}], {mm.Groups[1].Value}[{mm.Groups[2].Value} + 1], {mm.Groups[1].Value}[{mm.Groups[2].Value} + 2]";
-                    return $"{converted}, {converted}, {converted}";
-                if (vectorLocals.Contains(converted))
-                    return $"VecUnpack({converted})";
+
+                var mm = Regex.Match(converted, @"^(Local|Global)\[(.+)\]$");
+                if (mm.Success)
+                {
+                    string mem = mm.Groups[1].Value;
+                    string idx = mm.Groups[2].Value;
+                    return $"{mem}[{idx}], {mem}[{idx} + 1], {mem}[{idx} + 2]";
+                }
+
+                return $"VecUnpack({converted})";
             }
+
             return converted;
         }
 
@@ -1014,14 +1023,14 @@ namespace Decompiler.Emitters
             var mG = Regex.Match(e, @"^Global_(\d+)(.*)$");
             if (mG.Success)
             {
-                var off = mG.Groups[1].Value + ParseOffset(mG.Groups[2].Value, prependPlus:true);
+                var off = mG.Groups[1].Value + ParseOffset(mG.Groups[2].Value, prependPlus: true);
                 return new MemoryAddress(MemoryKind.Global, "Global", "0", off, true);
             }
 
             var mL = Regex.Match(e, @"^[a-zA-Z]+Local_(\d+)(.*)$");
             if (mL.Success)
             {
-                var off = mL.Groups[1].Value + ParseOffset(mL.Groups[2].Value, prependPlus:true);
+                var off = mL.Groups[1].Value + ParseOffset(mL.Groups[2].Value, prependPlus: true);
                 return new MemoryAddress(MemoryKind.Local, "Local", "0", off, true);
             }
 
@@ -1035,44 +1044,44 @@ namespace Decompiler.Emitters
             return new MemoryAddress(MemoryKind.Unknown, "", "", expr, false);
         }
 
-        private static string ParseOffset(string suffix, bool prependPlus=false)
+        private static string ParseOffset(string suffix, bool prependPlus = false)
         {
             string rem = suffix;
             List<string> parts = new();
             foreach (Match f in Regex.Matches(rem, @"\.f_(\d+)")) parts.Add(f.Groups[1].Value);
             foreach (Match a in Regex.Matches(rem, @"\[(.*?)\]"))
             {
-                string inside=a.Groups[1].Value.Trim();
-                var sm=Regex.Match(inside,@"^(.*?)\s*/\*\s*(\d+)\s*\*/\s*$");
-                if(sm.Success) parts.Add($"({sm.Groups[1].Value.Trim()} * {sm.Groups[2].Value.Trim()})");
+                string inside = a.Groups[1].Value.Trim();
+                var sm = Regex.Match(inside, @"^(.*?)\s*/\*\s*(\d+)\s*\*/\s*$");
+                if (sm.Success) parts.Add($"({sm.Groups[1].Value.Trim()} * {sm.Groups[2].Value.Trim()})");
                 else parts.Add(inside);
             }
-            if(parts.Count==0) return "";
-            return (prependPlus?" + ":"") + string.Join(" + ", parts);
+            if (parts.Count == 0) return "";
+            return (prependPlus ? " + " : "") + string.Join(" + ", parts);
         }
 
         private static string EmitMemoryRead(MemoryAddress a) => a.Kind switch
         {
             MemoryKind.Local => $"Local[{a.OffsetExpr}]",
             MemoryKind.Global => $"Global[{a.OffsetExpr}]",
-            MemoryKind.Ref => $"RefGet({a.BaseName}, {a.OffsetExpr.TrimStart('+',' ')})",
-            MemoryKind.StructLocal => $"{a.BaseName}[{a.OffsetExpr.TrimStart('+',' ')}]",
+            MemoryKind.Ref => $"RefGet({a.BaseName}, {a.OffsetExpr.TrimStart('+', ' ')})",
+            MemoryKind.StructLocal => $"{a.BaseName}[{a.OffsetExpr.TrimStart('+', ' ')}]",
             _ => a.OffsetExpr
         };
         private static string EmitMemoryWrite(MemoryAddress a, string value) => a.Kind switch
         {
             MemoryKind.Local => $"Local[{a.OffsetExpr}] = {value}",
             MemoryKind.Global => $"Global[{a.OffsetExpr}] = {value}",
-            MemoryKind.Ref => $"RefSet({a.BaseName}, {value}, {a.OffsetExpr.TrimStart('+',' ')})",
-            MemoryKind.StructLocal => $"{a.BaseName}[{a.OffsetExpr.TrimStart('+',' ')}] = {value}",
+            MemoryKind.Ref => $"RefSet({a.BaseName}, {value}, {a.OffsetExpr.TrimStart('+', ' ')})",
+            MemoryKind.StructLocal => $"{a.BaseName}[{a.OffsetExpr.TrimStart('+', ' ')}] = {value}",
             _ => $"-- TODO memory write unsupported: {value}"
         };
         private static string EmitMemoryRef(MemoryAddress a) => a.Kind switch
         {
             MemoryKind.Local => $"LocalRef({a.OffsetExpr})",
             MemoryKind.Global => $"GlobalRef({a.OffsetExpr})",
-            MemoryKind.Ref => $"RefAt({a.BaseName}, {a.OffsetExpr.TrimStart('+',' ')})",
-            MemoryKind.StructLocal => $"StructRef({a.BaseName}, {a.OffsetExpr.TrimStart('+',' ')})",
+            MemoryKind.Ref => $"RefAt({a.BaseName}, {a.OffsetExpr.TrimStart('+', ' ')})",
+            MemoryKind.StructLocal => $"StructRef({a.BaseName}, {a.OffsetExpr.TrimStart('+', ' ')})",
             _ => a.OffsetExpr
         };
 
