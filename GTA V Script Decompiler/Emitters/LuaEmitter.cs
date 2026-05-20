@@ -371,6 +371,14 @@ namespace Decompiler.Emitters
             output = Regex.Replace(output, @"&\s*Local\[(.+?)\]", "LocalRef($1)");
             output = Regex.Replace(output, @"&\s*Global\[(.+?)\]", "GlobalRef($1)");
             output = Regex.Replace(output, @"&\s*([A-Za-z_]\w*)", "VarRef(function() return $1 end, function(v) $1 = v end)");
+            output = Regex.Replace(output, @"\b(vParam\w*|outPosition|unk\d+)\.f_0\b", "$1.x");
+            output = Regex.Replace(output, @"\b(vParam\w*|outPosition|unk\d+)\.f_1\b", "$1.y");
+            output = Regex.Replace(output, @"\b(vParam\w*|outPosition|unk\d+)\.f_2\b", "$1.z");
+            output = Regex.Replace(output, @"BUILTIN\.VMAG\(([^)]+)\)", "BUILTIN.VMAG(VecUnpack($1))");
+            output = Regex.Replace(output, @"BUILTIN\.VDIST2?\(([^,]+),\s*([^)]+)\)", "BUILTIN.VDIST($1, $2)");
+            output = output.Replace("->", ".");
+            output = output.Replace("/*", "--").Replace("*/", "");
+            output = output.Replace("(float)", "");
             return output;
         }
 
@@ -471,6 +479,9 @@ namespace Decompiler.Emitters
         private static string ConvertRefExpression(string inner)
         {
             string mem = inner.Trim();
+            var ptrField = Regex.Match(mem, @"^([A-Za-z_]\w*)->((?:f_\d+\.)*f_\d+)$");
+            if (ptrField.Success)
+                return $"RefAt({ptrField.Groups[1].Value}, {BuildOffsetExpr(ptrField.Groups[2].Value, "")})";
             mem = ReplaceMemoryRefs(mem, true);
             mem = ReplaceMemoryRefs(mem, false);
             var ml = Regex.Match(mem, @"^Local\[(.+)\]$");
@@ -643,11 +654,11 @@ namespace Decompiler.Emitters
             }
 
             if (baseExpr == null)
-                return $"-- TODO StoreN unsupported: ptr={ptr?.GetType().Name}, count={countExpr}, text={storeN}";
+                return $"-- TODO StoreN unsupported: ptr={ptr?.GetType().Name}, count={countExpr}, text={SanitizeTodoText(storeN.ToString())}";
 
             if (!string.IsNullOrWhiteSpace(countExpr))
                 return $"StoreN(Local, {baseExpr}, {countExpr}, {valueExpr})";
-            return $"-- TODO StoreN unsupported: ptr={ptr?.GetType().Name}, count=<null>, text={storeN}";
+            return $"-- TODO StoreN unsupported: ptr={ptr?.GetType().Name}, count=<null>, text={SanitizeTodoText(storeN.ToString())}";
         }
 
         private string ConvertStoreNValue(string expr, string? countExpr)
@@ -751,6 +762,10 @@ namespace Decompiler.Emitters
             sb.AppendLine("    ref.mem[ref.index + offset] = value");
             sb.AppendLine("end");
             sb.AppendLine();
+            sb.AppendLine("function RefAt(ref, offset)");
+            sb.AppendLine("    return { get = function() return RefGet(ref, offset) end, set = function(value) RefSet(ref, value, offset) end, index = ref.index + offset, mem = ref.mem }");
+            sb.AppendLine("end");
+            sb.AppendLine();
             sb.AppendLine("function RefN(ref, offset, count)");
             sb.AppendLine("    local out = {}");
             sb.AppendLine("    for i = 1, count do out[i] = RefGet(ref, (offset or 0) + (i - 1)) end");
@@ -773,6 +788,11 @@ namespace Decompiler.Emitters
         {
             sb.Append(new string(' ', indent * 4));
             sb.AppendLine(text);
+        }
+
+        private static string SanitizeTodoText(string text)
+        {
+            return text.Replace("->", ".").Replace("/*", "[").Replace("*/", "]").Replace("&", "@");
         }
     }
 }
