@@ -15,5 +15,8 @@ namespace Decompiler
 
 		[Option('v', "verbose", HelpText = "Show which file is currently being decompiled.")]
 		public bool Verbose { get; set; }
+
+		[Option("lua", Default = false, HelpText = "Emit Lua output instead of C-like output.")]
+		public bool Lua { get; set; }
 	}
 }
