@@ -52,7 +52,19 @@ namespace Decompiler.Emitters
             {
                 sb.AppendLine(EmitFunction(func));
             }
-            return sb.ToString();
+
+            var result = sb.ToString();
+            var warns = BuildWarnings(result);
+            if (warns.Length > 0)
+            {
+                StringBuilder wb = new();
+                wb.AppendLine("-- LUA_EMITTER_WARNINGS:");
+                foreach (var w in warns) wb.AppendLine($"-- found invalid token: {w}");
+                wb.AppendLine();
+                wb.Append(result);
+                result = wb.ToString();
+            }
+            return result;
         }
 
         private void EmitTreeBody(StringBuilder sb, Tree tree, int indent, bool insideSwitchCase)
@@ -344,6 +356,7 @@ namespace Decompiler.Emitters
             string output = input.Replace("&&", "and").Replace("||", "or");
             output = output.Replace("!=", "~=");
             output = output.Replace("!", "not ");
+            output = Regex.Replace(output, @"\b([A-Za-z_]\w*|\d+)\s*&\s*([A-Za-z_]\w*|\d+)\b", "BitAnd($1, $2)");
             return output;
         }
 
@@ -389,6 +402,21 @@ namespace Decompiler.Emitters
         {
             string output = input;
 
+
+            // uParam1->[i /*5*/].f_1 = v
+            output = Regex.Replace(output, @"\b([A-Za-z_]\w*)->\[(.*?)\]\.f_(\d+)\s*(?<![=!<>])=(?!=)\s*(.+)$", m =>
+            {
+                string ptr=m.Groups[1].Value; string idx=ConvertInlineArrayIndex(m.Groups[2].Value.Trim()); string f=m.Groups[3].Value; string v=m.Groups[4].Value;
+                return $"RefSet({ptr}, {v}, ({idx}) + {f})";
+            });
+            // uParam1->f_221[i /*5*/].f_1 = v
+            output = Regex.Replace(output, @"\b([A-Za-z_]\w*)->((?:f_\d+\.)*)\[(.*?)\]\.f_(\d+)\s*(?<![=!<>])=(?!=)\s*(.+)$", m =>
+            {
+                string ptr=m.Groups[1].Value; string pre=m.Groups[2].Value; string idx=ConvertInlineArrayIndex(m.Groups[3].Value.Trim()); string f=m.Groups[4].Value; string v=m.Groups[5].Value;
+                string preOff = BuildOffsetExpr(pre + "f_0", "").Replace(" + 0", "").Trim();
+                string off = (preOff == "0" || preOff == "") ? idx : $"{preOff} + ({idx})";
+                return $"RefSet({ptr}, {v}, {off} + {f})";
+            });
             // uParam0->f_1.f_2[expr /*stride*/] = value  => RefSet(uParam0, value, offsetExpr)
             output = Regex.Replace(output, @"\b([A-Za-z_]\w*)->((?:f_\d+\.)*f_\d+)(\[[^\]]+\])?\s*(?<![=!<>])=(?!=)\s*(.+)$", m =>
             {
@@ -482,9 +510,17 @@ namespace Decompiler.Emitters
         private static string ConvertRefExpression(string inner)
         {
             string mem = inner.Trim();
-            var ptrField = Regex.Match(mem, @"^([A-Za-z_]\w*)->((?:f_\d+\.)*f_\d+)$");
-            if (ptrField.Success)
-                return $"RefAt({ptrField.Groups[1].Value}, {BuildOffsetExpr(ptrField.Groups[2].Value, "")})";
+            var ptrAny = Regex.Match(mem, @"^([A-Za-z_]\w*)->((?:f_\d+\.)*f_\d+)?(\[[^\]]+\])?(?:\.f_(\d+))?$");
+            if (ptrAny.Success)
+            {
+                string ptr = ptrAny.Groups[1].Value;
+                string fields = ptrAny.Groups[2].Success && ptrAny.Groups[2].Value.Length>0 ? ptrAny.Groups[2].Value : "f_0";
+                string arr = ptrAny.Groups[3].Success ? ptrAny.Groups[3].Value : "";
+                string off = BuildOffsetExpr(fields, arr).Replace(" + 0", "").Trim();
+                if (ptrAny.Groups[4].Success) off += $" + {ptrAny.Groups[4].Value}";
+                if (off == "0" || off == "") off = "0";
+                return $"RefAt({ptr}, {off})";
+            }
             mem = ReplaceMemoryRefs(mem, true);
             mem = ReplaceMemoryRefs(mem, false);
             var ml = Regex.Match(mem, @"^Local\[(.+)\]$");
@@ -720,11 +756,22 @@ namespace Decompiler.Emitters
             sb.AppendLine("    end");
             sb.AppendLine("end");
             sb.AppendLine();
+            sb.AppendLine("function StoreNFromMemRef(dstRef, dstOffset, count, srcMem, srcBase)");
+            sb.AppendLine("    for n = 0, count - 1 do RefSet(dstRef, srcMem[srcBase + n], dstOffset + n) end");
+            sb.AppendLine("end");
+            sb.AppendLine();
             sb.AppendLine("function StoreNRef(ref, offset, count, ...)");
             sb.AppendLine("    local values = {...}");
             sb.AppendLine("    for i = 1, count do");
             sb.AppendLine("        RefSet(ref, values[i], offset + (i - 1))");
             sb.AppendLine("    end");
+            sb.AppendLine("end");
+            sb.AppendLine();
+            sb.AppendLine("function StructVar(count, first)");
+            sb.AppendLine("    local t = { __struct = true, __count = count }");
+            sb.AppendLine("    t[0] = first or 0");
+            sb.AppendLine("    for i = 1, count - 1 do t[i] = 0 end");
+            sb.AppendLine("    return t");
             sb.AppendLine("end");
             sb.AppendLine();
             sb.AppendLine("function StructAssign(mem, base, value, count)");
@@ -751,8 +798,29 @@ namespace Decompiler.Emitters
             sb.AppendLine("    return { get = function() return Global[index] end, set = function(value) Global[index] = value end, index = index, mem = Global }");
             sb.AppendLine("end");
             sb.AppendLine();
+            sb.AppendLine("function StructRef(s, offset)");
+            sb.AppendLine("    return { get = function() return s[offset] end, set = function(value) s[offset] = value end, struct = s, offset = offset }");
+            sb.AppendLine("end");
+            sb.AppendLine();
+            sb.AppendLine("function StructUnpack(s, count)");
+            sb.AppendLine("    if type(s) == \"table\" and s.__struct then");
+            sb.AppendLine("        local out = {}");
+            sb.AppendLine("        for i = 0, count - 1 do out[#out + 1] = s[i] or 0 end");
+            sb.AppendLine("        return table.unpack(out)");
+            sb.AppendLine("    end");
+            sb.AppendLine("    local out = {s}");
+            sb.AppendLine("    for i = 2, count do out[i] = 0 end");
+            sb.AppendLine("    return table.unpack(out)");
+            sb.AppendLine("end");
+            sb.AppendLine();
             sb.AppendLine("function VarRef(getter, setter)");
             sb.AppendLine("    return { get = getter, set = setter, isVarRef = true }");
+            sb.AppendLine("end");
+            sb.AppendLine();
+            sb.AppendLine("function BitAnd(a, b)");
+            sb.AppendLine("    if bit32 and bit32.band then return bit32.band(a, b) end");
+            sb.AppendLine("    if bit and bit.band then return bit.band(a, b) end");
+            sb.AppendLine("    return a & b");
             sb.AppendLine("end");
             sb.AppendLine();
             sb.AppendLine("function RefGet(ref, offset)");
@@ -785,6 +853,17 @@ namespace Decompiler.Emitters
             sb.AppendLine("    return v, nil, nil");
             sb.AppendLine("end");
             sb.AppendLine();
+        }
+
+        private static string[] BuildWarnings(string text)
+        {
+            List<string> w = new();
+            if (text.Contains("->")) w.Add("->");
+            if (text.Contains("/*")) w.Add("/*");
+            if (text.Contains("&")) w.Add("&");
+            if (Regex.IsMatch(text, @"RefGet\([^\)]*\)\s*=")) w.Add("RefGet() =");
+            if (text.Contains(".f_")) w.Add(".f_");
+            return w.ToArray();
         }
 
         private static void AppendLine(StringBuilder sb, int indent, string text)
