@@ -336,7 +336,34 @@ namespace Decompiler.Emitters
 
         private static string ConvertStatement(string statement)
         {
-            return NormalizeResolvedArtifacts(ConvertMemoryModel(ConvertOperators(ConvertFloatLiterals(ConvertNamespaces(statement.TrimEnd(';'))))));
+            var converted = NormalizeResolvedArtifacts(ConvertMemoryModel(ConvertOperators(ConvertFloatLiterals(ConvertNamespaces(statement.TrimEnd(';'))))));
+            if (IsNoOpExpressionStatement(converted))
+            {
+                return $"-- ignored no-op expression:{Environment.NewLine}-- {converted}{Environment.NewLine}-- ignored noop expression statement";
+            }
+            return converted;
+        }
+
+        private static bool IsNoOpExpressionStatement(string expr)
+        {
+            string s = expr.Trim();
+            if (string.IsNullOrEmpty(s))
+                return false;
+
+            // Keep real statements.
+            if (s.StartsWith("return ") || s == "return" || s.StartsWith("if ") || s.StartsWith("while ") || s.StartsWith("for ") || s == "break")
+                return false;
+            if (s.Contains("=") && !s.Contains("==") && !s.Contains("~=") && !s.Contains("<=") && !s.Contains(">="))
+                return false;
+            if (Regex.IsMatch(s, @"^\w+\s*\(.*\)$"))
+                return false; // standalone call can have side-effects.
+
+            // Pure expression operators / comparisons that are invalid as standalone Lua statements.
+            if (s.Contains("==") || s.Contains("~=") || s.Contains("<=") || s.Contains(">=") || s.Contains(" < ") || s.Contains(" > ")
+                || s.Contains(" + ") || s.Contains(" - ") || s.Contains(" * ") || s.Contains(" / ") || s.Contains(" and ") || s.Contains(" or "))
+                return true;
+
+            return false;
         }
 
         private static string ConvertStaticDeclaration(string declaration)
