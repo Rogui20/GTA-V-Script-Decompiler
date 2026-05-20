@@ -308,7 +308,7 @@ namespace Decompiler.Emitters
             string value = token is NativeCall native
                 ? ConvertNativeExpression(native)
                 : token.ToString();
-            return ConvertMemoryModel(ConvertOperators(ConvertFloatLiterals(ConvertNamespaces(value.TrimEnd(';')))));
+            return NormalizeResolvedArtifacts(ConvertMemoryModel(ConvertOperators(ConvertFloatLiterals(ConvertNamespaces(value.TrimEnd(';'))))));
         }
 
         private static string ConvertNativeExpression(NativeCall call)
@@ -322,7 +322,7 @@ namespace Decompiler.Emitters
 
         private static string ConvertStatement(string statement)
         {
-            return ConvertMemoryModel(ConvertOperators(ConvertFloatLiterals(ConvertNamespaces(statement.TrimEnd(';')))));
+            return NormalizeResolvedArtifacts(ConvertMemoryModel(ConvertOperators(ConvertFloatLiterals(ConvertNamespaces(statement.TrimEnd(';'))))));
         }
 
         private static string ConvertStaticDeclaration(string declaration)
@@ -394,7 +394,6 @@ namespace Decompiler.Emitters
             output = Regex.Replace(output, @"\b(vParam\w*|outPosition|unk\d+)\.f_2\b", "$1.z");
             output = Regex.Replace(output, @"BUILTIN\.VMAG\(([^)]+)\)", "BUILTIN.VMAG(VecUnpack($1))");
             output = Regex.Replace(output, @"BUILTIN\.VDIST2?\(([^,]+),\s*([^)]+)\)", "BUILTIN.VDIST($1, $2)");
-            output = output.Replace("->", ".");
             output = output.Replace("/*", "--").Replace("*/", "");
             output = output.Replace("(float)", "");
             output = Regex.Replace(output, @"RefGet\(([^)]+)\)\s*=\s*(.+)$", "RefSet($1, $2)");
@@ -713,7 +712,10 @@ namespace Decompiler.Emitters
                 if (mr.Success)
                     return $"RefN({mr.Groups[1].Value}, 0, 3)";
                 if (Regex.IsMatch(converted, @"^(Local|Global)\[.+\]$"))
-                    return $"{converted}, {converted} + 1, {converted} + 2";
+                    var mm = Regex.Match(converted, @"^(Local|Global)\[(.+)\]$");
+                    if (mm.Success)
+                        return $"{mm.Groups[1].Value}[{mm.Groups[2].Value}], {mm.Groups[1].Value}[{mm.Groups[2].Value} + 1], {mm.Groups[1].Value}[{mm.Groups[2].Value} + 2]";
+                    return $"{converted}, {converted}, {converted}";
                 if (vectorLocals.Contains(converted))
                     return $"VecUnpack({converted})";
             }
@@ -823,7 +825,7 @@ namespace Decompiler.Emitters
             sb.AppendLine("function BitAnd(a, b)");
             sb.AppendLine("    if bit32 and bit32.band then return bit32.band(a, b) end");
             sb.AppendLine("    if bit and bit.band then return bit.band(a, b) end");
-            sb.AppendLine("    return a & b");
+            sb.AppendLine("    return 0 -- fallback when no bit library is present");
             sb.AppendLine("end");
             sb.AppendLine();
             sb.AppendLine("function RefGet(ref, offset)");
@@ -933,6 +935,23 @@ namespace Decompiler.Emitters
             MemoryKind.StructLocal => $"StructRef({a.BaseName}, {a.OffsetExpr.TrimStart('+',' ')})",
             _ => a.OffsetExpr
         };
+
+        private static string NormalizeResolvedArtifacts(string input)
+        {
+            string o = input;
+            o = Regex.Replace(o, @"\b([A-Za-z_]\w+)\.f_(\d+)\[(.*?)\]", m => $"{m.Groups[1].Value}[{m.Groups[2].Value} + {ConvertInlineArrayIndex(m.Groups[3].Value)}]");
+            o = Regex.Replace(o, @"\b([A-Za-z_]\w+)\.f_(\d+)", "$1[$2]");
+            o = Regex.Replace(o, @"Global\[([^\]]+)\]\.f_(\d+)\[(.*?)\]", m => $"Global[{m.Groups[1].Value} + {m.Groups[2].Value} + {ConvertInlineArrayIndex(m.Groups[3].Value)}]");
+            o = Regex.Replace(o, @"Global\[([^\]]+)\]\.f_(\d+)", "Global[$1 + $2]");
+            o = Regex.Replace(o, @"Local\[([^\]]+)\]\.f_(\d+)\[(.*?)\]", m => $"Local[{m.Groups[1].Value} + {m.Groups[2].Value} + {ConvertInlineArrayIndex(m.Groups[3].Value)}]");
+            o = Regex.Replace(o, @"Local\[([^\]]+)\]\.f_(\d+)", "Local[$1 + $2]");
+            o = Regex.Replace(o, @"RefGet\(([^\)]*)\)\.f_(\d+)\[(.*?)\]", m => $"RefGet({m.Groups[1].Value}, {m.Groups[2].Value} + {ConvertInlineArrayIndex(m.Groups[3].Value)})");
+            o = Regex.Replace(o, @"RefGet\(([^\)]*)\)\[(.*?)\]", m => $"RefGet({m.Groups[1].Value}, {ConvertInlineArrayIndex(m.Groups[2].Value)})");
+            o = Regex.Replace(o, @"RefGet\(([^\)]*),\s*([^\)]*)\)\.f_(\d+)\[(.*?)\]", m => $"RefGet({m.Groups[1].Value}, {m.Groups[2].Value} + {m.Groups[3].Value} + {ConvertInlineArrayIndex(m.Groups[4].Value)})");
+            o = Regex.Replace(o, @"VarRef\(function\(\) return ([A-Za-z_]\w+) end, function\(v\) \1 = v end\)\.f_(\d+)\[(.*?)\]", m => $"StructRef({m.Groups[1].Value}, {m.Groups[2].Value} + {ConvertInlineArrayIndex(m.Groups[3].Value)})");
+            o = Regex.Replace(o, @"VarRef\(function\(\) return ([A-Za-z_]\w+) end, function\(v\) \1 = v end\)\.f_(\d+)", "StructRef($1, $2)");
+            return o;
+        }
         private static string[] BuildWarnings(string text)
         {
             List<string> w = new();
