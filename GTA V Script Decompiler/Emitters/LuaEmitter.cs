@@ -150,8 +150,11 @@ namespace Decompiler.Emitters
 
             if (defaultCase != null)
             {
-                AppendLine(sb, indent, first ? "if true then" : "else");
-                EmitTreeBody(sb, defaultCase, indent + 1, true);
+                if (defaultCase.Statements.Count > 0)
+                {
+                    AppendLine(sb, indent, first ? "if true then" : "else");
+                    EmitTreeBody(sb, defaultCase, indent + 1, true);
+                }
             }
 
             if (!first || defaultCase != null)
@@ -366,6 +369,7 @@ namespace Decompiler.Emitters
             // Final pass: after memory lowering we may still have &Local[...] / &Global[...] in nested call arguments.
             output = Regex.Replace(output, @"&\s*Local\[(.+?)\]", "LocalRef($1)");
             output = Regex.Replace(output, @"&\s*Global\[(.+?)\]", "GlobalRef($1)");
+            output = Regex.Replace(output, @"&\s*([A-Za-z_]\w*)", "VarRef(function() return $1 end, function(v) $1 = v end)");
             return output;
         }
 
@@ -552,6 +556,22 @@ namespace Decompiler.Emitters
                     valueExpr = ConvertStatement(m.Groups[2].Value);
                 }
             }
+            // Fallback for array-pointer StoreN, e.g.:
+            // iLocal_962.f_585[0 /*3*/] = { func_51(...) };
+            if (baseExpr == null && ptr?.GetType().Name == "Array")
+            {
+                var text = storeN.ToString();
+                var m = Regex.Match(text, @"\b[a-zA-Z]+Local_(\d+)((?:\.f_\d+)*)(\[[^\]]+\])\s*=\s*\{\s*(.+?)\s*\};$");
+                if (m.Success)
+                {
+                    int baseIdx = int.Parse(m.Groups[1].Value);
+                    int fieldSum = 0;
+                    foreach (Match fm in Regex.Matches(m.Groups[2].Value, @"\.f_(\d+)"))
+                        fieldSum += int.Parse(fm.Groups[1].Value);
+                    baseExpr = $"{baseIdx + fieldSum}{ConvertArrayIndexToOffset(m.Groups[3].Value)}";
+                    valueExpr = ConvertStatement(m.Groups[4].Value);
+                }
+            }
 
             if (baseExpr == null)
                 return $"-- TODO StoreN unsupported: ptr={ptr?.GetType().Name}, count={countExpr}, text={storeN}";
@@ -592,6 +612,7 @@ namespace Decompiler.Emitters
 
         private static void EmitRuntimeHelpers(StringBuilder sb)
         {
+            sb.AppendLine("-- Vector3 returns are emitted as Lua multi-return x, y, z.");
             sb.AppendLine("function StoreN(mem, base, count, ...)");
             sb.AppendLine("    local values = {...}");
             sb.AppendLine("    for i = 1, count do");
@@ -621,6 +642,10 @@ namespace Decompiler.Emitters
             sb.AppendLine();
             sb.AppendLine("function GlobalRef(index)");
             sb.AppendLine("    return { get = function() return Global[index] end, set = function(value) Global[index] = value end, index = index, mem = Global }");
+            sb.AppendLine("end");
+            sb.AppendLine();
+            sb.AppendLine("function VarRef(getter, setter)");
+            sb.AppendLine("    return { get = getter, set = setter, isVarRef = true }");
             sb.AppendLine("end");
             sb.AppendLine();
             sb.AppendLine("function RefGet(ref, offset)");
