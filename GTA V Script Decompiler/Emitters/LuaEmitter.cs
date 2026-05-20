@@ -16,6 +16,7 @@ namespace Decompiler.Emitters
     internal class LuaEmitter : IEmitter
     {
         private int switchTempIndex = 0;
+        private readonly HashSet<string> vectorLocals = new();
 
         public string EmitFunction(Function func)
         {
@@ -396,6 +397,22 @@ namespace Decompiler.Emitters
         private static string ReplacePointerReads(string input)
         {
             string output = input;
+            // uParam0->[i /*4*/].f_3 => RefGet(uParam0, (i * 4) + 3)
+            output = Regex.Replace(output, @"\b([A-Za-z_]\w*)->\[(.*?)\]\.f_(\d+)", m =>
+            {
+                string ptr = m.Groups[1].Value;
+                string idx = m.Groups[2].Value.Trim();
+                string field = m.Groups[3].Value;
+                string idxExpr = ConvertInlineArrayIndex(idx);
+                return $"RefGet({ptr}, ({idxExpr}) + {field})";
+            });
+            // uParam0->[i /*4*/] => RefGet(uParam0, i * 4)
+            output = Regex.Replace(output, @"\b([A-Za-z_]\w*)->\[(.*?)\]", m =>
+            {
+                string ptr = m.Groups[1].Value;
+                string idx = m.Groups[2].Value.Trim();
+                return $"RefGet({ptr}, {ConvertInlineArrayIndex(idx)})";
+            });
             // uParam0->f_1.f_2[expr] => RefGet(uParam0, offsetExpr)
             output = Regex.Replace(output, @"\b([A-Za-z_]\w*)->((?:f_\d+\.)*f_\d+)(\[[^\]]+\])?", m =>
             {
@@ -437,6 +454,18 @@ namespace Decompiler.Emitters
                 }
             }
             return expr;
+        }
+
+        private static string ConvertInlineArrayIndex(string inside)
+        {
+            var sm = Regex.Match(inside, @"^(.*?)\s*/\*\s*(\d+)\s*\*/\s*$");
+            if (sm.Success)
+            {
+                string idx = sm.Groups[1].Value.Trim();
+                string stride = sm.Groups[2].Value.Trim();
+                return $"{idx} * {stride}";
+            }
+            return inside;
         }
 
         private static string ConvertRefExpression(string inner)
@@ -499,6 +528,7 @@ namespace Decompiler.Emitters
 
         private void EmitFunctionLocals(StringBuilder sb, Function func, int indent)
         {
+            vectorLocals.Clear();
             foreach (var decl in func.Vars.GetDeclaration())
             {
                 string line = decl.Trim().TrimEnd(';');
@@ -529,7 +559,7 @@ namespace Decompiler.Emitters
             return string.Join(", ", names);
         }
 
-        private static string ConvertStoreN(StoreN storeN)
+        private string ConvertStoreN(StoreN storeN)
         {
             object? ptr = GetPrivateField(storeN, "Pointer");
             object? cnt = GetPrivateField(storeN, "Count");
@@ -561,15 +591,54 @@ namespace Decompiler.Emitters
             if (baseExpr == null && ptr?.GetType().Name == "Array")
             {
                 var text = storeN.ToString();
-                var m = Regex.Match(text, @"\b[a-zA-Z]+Local_(\d+)((?:\.f_\d+)*)(\[[^\]]+\])\s*=\s*\{\s*(.+?)\s*\};$");
+                var m = Regex.Match(text, @"\b([a-zA-Z]+Local_(\d+)|Global_(\d+))((?:\.f_\d+)*)(\[[^\]]+\])\s*=\s*\{\s*(.+?)\s*\};$");
                 if (m.Success)
                 {
-                    int baseIdx = int.Parse(m.Groups[1].Value);
+                    bool isGlobal = m.Groups[3].Success;
+                    int baseIdx = int.Parse(isGlobal ? m.Groups[3].Value : m.Groups[2].Value);
                     int fieldSum = 0;
-                    foreach (Match fm in Regex.Matches(m.Groups[2].Value, @"\.f_(\d+)"))
+                    foreach (Match fm in Regex.Matches(m.Groups[4].Value, @"\.f_(\d+)"))
                         fieldSum += int.Parse(fm.Groups[1].Value);
-                    baseExpr = $"{baseIdx + fieldSum}{ConvertArrayIndexToOffset(m.Groups[3].Value)}";
-                    valueExpr = ConvertStatement(m.Groups[4].Value);
+                    baseExpr = $"{baseIdx + fieldSum}{ConvertArrayIndexToOffset(m.Groups[5].Value)}";
+                    valueExpr = ConvertStoreNValue(m.Groups[6].Value, countExpr);
+                    if (isGlobal && !string.IsNullOrWhiteSpace(countExpr))
+                        return $"StoreN(Global, {baseExpr}, {countExpr}, {valueExpr})";
+                }
+            }
+            if (baseExpr == null && ptr?.GetType().Name == "Offset")
+            {
+                var text = storeN.ToString();
+                var mRef = Regex.Match(text, @"^([A-Za-z_]\w+)->((?:f_\d+\.)*f_\d+)\s*=\s*\{\s*(.+?)\s*\};$");
+                if (mRef.Success && !string.IsNullOrWhiteSpace(countExpr))
+                {
+                    string off = BuildOffsetExpr(mRef.Groups[2].Value, "");
+                    string val = ConvertStoreNValue(mRef.Groups[3].Value, countExpr);
+                    return $"StoreNRef({mRef.Groups[1].Value}, {off}, {countExpr}, {val})";
+                }
+                var mG = Regex.Match(text, @"^Global_(\d+)((?:\.f_\d+)*)\s*=\s*\{\s*(.+?)\s*\};$");
+                if (mG.Success && !string.IsNullOrWhiteSpace(countExpr))
+                {
+                    int baseIdx = int.Parse(mG.Groups[1].Value);
+                    int fieldSum = 0;
+                    foreach (Match fm in Regex.Matches(mG.Groups[2].Value, @"\.f_(\d+)")) fieldSum += int.Parse(fm.Groups[1].Value);
+                    return $"StoreN(Global, {baseIdx + fieldSum}, {countExpr}, {ConvertStoreNValue(mG.Groups[3].Value, countExpr)})";
+                }
+            }
+            if (baseExpr == null && ptr?.GetType().Name == "LocalLoad")
+            {
+                var text = storeN.ToString();
+                var m = Regex.Match(text, @"^\*([A-Za-z_]\w+)\s*=\s*\{\s*(.+?)\s*\};$");
+                if (m.Success && !string.IsNullOrWhiteSpace(countExpr))
+                    return $"StoreNRef({m.Groups[1].Value}, 0, {countExpr}, {ConvertStoreNValue(m.Groups[2].Value, countExpr)})";
+            }
+            if (baseExpr == null && ptr?.GetType().Name == "Local")
+            {
+                var text = storeN.ToString();
+                var m = Regex.Match(text, @"^([A-Za-z_]\w+)\s*=\s*\{\s*(.+?)\s*\};$");
+                if (m.Success && countExpr == "3")
+                {
+                    vectorLocals.Add(m.Groups[1].Value);
+                    return $"{m.Groups[1].Value} = Vec3({ConvertStoreNValue(m.Groups[2].Value, countExpr)})";
                 }
             }
 
@@ -579,6 +648,23 @@ namespace Decompiler.Emitters
             if (!string.IsNullOrWhiteSpace(countExpr))
                 return $"StoreN(Local, {baseExpr}, {countExpr}, {valueExpr})";
             return $"-- TODO StoreN unsupported: ptr={ptr?.GetType().Name}, count=<null>, text={storeN}";
+        }
+
+        private string ConvertStoreNValue(string expr, string? countExpr)
+        {
+            var c = (countExpr ?? "").Trim();
+            var converted = ConvertStatement(expr);
+            if (c == "3")
+            {
+                var mr = Regex.Match(converted, @"^RefGet\((.+)\)$");
+                if (mr.Success)
+                    return $"RefN({mr.Groups[1].Value}, 0, 3)";
+                if (Regex.IsMatch(converted, @"^(Local|Global)\[.+\]$"))
+                    return $"{converted}, {converted} + 1, {converted} + 2";
+                if (vectorLocals.Contains(converted))
+                    return $"VecUnpack({converted})";
+            }
+            return converted;
         }
 
         private static string ConvertDrop(Drop drop)
@@ -620,6 +706,13 @@ namespace Decompiler.Emitters
             sb.AppendLine("    end");
             sb.AppendLine("end");
             sb.AppendLine();
+            sb.AppendLine("function StoreNRef(ref, offset, count, ...)");
+            sb.AppendLine("    local values = {...}");
+            sb.AppendLine("    for i = 1, count do");
+            sb.AppendLine("        RefSet(ref, values[i], offset + (i - 1))");
+            sb.AppendLine("    end");
+            sb.AppendLine("end");
+            sb.AppendLine();
             sb.AppendLine("function StructAssign(mem, base, value, count)");
             sb.AppendLine("    if type(value) == \"table\" then");
             sb.AppendLine("        for k, v in pairs(value) do");
@@ -656,6 +749,22 @@ namespace Decompiler.Emitters
             sb.AppendLine("function RefSet(ref, value, offset)");
             sb.AppendLine("    offset = offset or 0");
             sb.AppendLine("    ref.mem[ref.index + offset] = value");
+            sb.AppendLine("end");
+            sb.AppendLine();
+            sb.AppendLine("function RefN(ref, offset, count)");
+            sb.AppendLine("    local out = {}");
+            sb.AppendLine("    for i = 1, count do out[i] = RefGet(ref, (offset or 0) + (i - 1)) end");
+            sb.AppendLine("    return table.unpack(out)");
+            sb.AppendLine("end");
+            sb.AppendLine();
+            sb.AppendLine("function Vec3(x, y, z)");
+            sb.AppendLine("    if type(x) == \"table\" and x.__vec3 then return Vec3(x.x, x.y, x.z) end");
+            sb.AppendLine("    return { __vec3 = true, x = x or 0.0, y = y or 0.0, z = z or 0.0 }");
+            sb.AppendLine("end");
+            sb.AppendLine();
+            sb.AppendLine("function VecUnpack(v)");
+            sb.AppendLine("    if type(v) == \"table\" and v.__vec3 then return v.x, v.y, v.z end");
+            sb.AppendLine("    return v, nil, nil");
             sb.AppendLine("end");
             sb.AppendLine();
         }
