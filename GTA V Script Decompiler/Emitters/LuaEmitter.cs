@@ -17,6 +17,8 @@ namespace Decompiler.Emitters
     {
         private int switchTempIndex = 0;
         private readonly HashSet<string> vectorLocals = new();
+        private int errorCount = 0;
+        private int skippedStatements = 0;
 
         private enum MemoryKind { Local, Global, Ref, StructLocal, Unknown }
         private record MemoryAddress(MemoryKind Kind, string BaseName, string BaseIndex, string OffsetExpr, bool IsAddressable);
@@ -45,7 +47,11 @@ namespace Decompiler.Emitters
         public string EmitScript(ScriptFile file)
         {
             AnalyzeScript(file);
+            errorCount = 0;
+            skippedStatements = 0;
             StringBuilder sb = new();
+            sb.AppendLine("-- LUA_EMITTER_ERRORS: 0");
+            sb.AppendLine("-- LUA_EMITTER_SKIPPED_STATEMENTS: 0");
             sb.AppendLine("Local = Local or {}");
             sb.AppendLine("Global = Global or {}");
             sb.AppendLine();
@@ -79,6 +85,8 @@ namespace Decompiler.Emitters
                 wb.Append(result);
                 result = wb.ToString();
             }
+            result = result.Replace("-- LUA_EMITTER_ERRORS: 0", $"-- LUA_EMITTER_ERRORS: {errorCount}");
+            result = result.Replace("-- LUA_EMITTER_SKIPPED_STATEMENTS: 0", $"-- LUA_EMITTER_SKIPPED_STATEMENTS: {skippedStatements}");
             return result;
         }
 
@@ -86,7 +94,16 @@ namespace Decompiler.Emitters
         {
             foreach (var statement in tree.Statements)
             {
-                EmitNode(sb, statement, indent, insideSwitchCase);
+                try
+                {
+                    EmitNode(sb, statement, indent, insideSwitchCase);
+                }
+                catch
+                {
+                    errorCount++;
+                    skippedStatements++;
+                    AppendLine(sb, indent, "-- TODO failed to convert block");
+                }
             }
         }
 
@@ -107,7 +124,16 @@ namespace Decompiler.Emitters
                     EmitFor(sb, f, indent);
                     break;
                 case AstToken token:
-                    EmitTokenStatement(sb, token, indent, insideSwitchCase);
+                    try
+                    {
+                        EmitTokenStatement(sb, token, indent, insideSwitchCase);
+                    }
+                    catch
+                    {
+                        errorCount++;
+                        skippedStatements++;
+                        AppendLine(sb, indent, $"-- TODO failed to convert statement: {SanitizeTodoText(token.ToString())}");
+                    }
                     break;
                 case Tree nested:
                     EmitTreeBody(sb, nested, indent, insideSwitchCase);
@@ -339,7 +365,9 @@ namespace Decompiler.Emitters
             var converted = NormalizeResolvedArtifacts(ConvertMemoryModel(ConvertOperators(ConvertFloatLiterals(ConvertNamespaces(statement.TrimEnd(';'))))));
             if (IsNoOpExpressionStatement(converted))
             {
-                return $"-- ignored no-op expression:{Environment.NewLine}-- {converted}{Environment.NewLine}-- ignored noop expression statement";
+                if (converted.Contains("==") || converted.Contains("~=") || converted.Contains(" < ") || converted.Contains(" > ") || converted.Contains("<=") || converted.Contains(">="))
+                    return $"-- ignored no-op comparison: {converted}";
+                return $"-- ignored no-op expression: {converted}";
             }
             return converted;
         }
@@ -355,7 +383,7 @@ namespace Decompiler.Emitters
                 return false;
             if (s.Contains("=") && !s.Contains("==") && !s.Contains("~=") && !s.Contains("<=") && !s.Contains(">="))
                 return false;
-            if (Regex.IsMatch(s, @"^\w+\s*\(.*\)$"))
+            if (Regex.IsMatch(s, @"^[A-Za-z_][A-Za-z0-9_\.]*\s*\(.*\)$"))
                 return false; // standalone call can have side-effects.
 
             // Pure expression operators / comparisons that are invalid as standalone Lua statements.
