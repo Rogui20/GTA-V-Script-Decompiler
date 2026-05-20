@@ -19,6 +19,7 @@ namespace Decompiler.Emitters
         {
             StringBuilder sb = new();
             sb.AppendLine($"function {func.Name}()") ;
+            EmitFunctionLocals(sb, func, 1);
             EmitTreeBody(sb, func.MainTree, 1, false);
             sb.AppendLine("end");
             return sb.ToString();
@@ -27,6 +28,9 @@ namespace Decompiler.Emitters
         public string EmitScript(ScriptFile file)
         {
             StringBuilder sb = new();
+            sb.AppendLine("Local = Local or {}");
+            sb.AppendLine("Global = Global or {}");
+            sb.AppendLine();
 
             // Script-level locals are emitted at the top so Lua output keeps variable context
             // similar to the current C-like output and can be expanded later for richer mappings.
@@ -255,7 +259,7 @@ namespace Decompiler.Emitters
             string value = token is NativeCall native
                 ? ConvertNativeExpression(native)
                 : token.ToString();
-            return ConvertOperators(ConvertFloatLiterals(ConvertNamespaces(value.TrimEnd(';'))));
+            return ConvertMemoryModel(ConvertOperators(ConvertFloatLiterals(ConvertNamespaces(value.TrimEnd(';')))));
         }
 
         private static string ConvertNativeExpression(NativeCall call)
@@ -269,7 +273,7 @@ namespace Decompiler.Emitters
 
         private static string ConvertStatement(string statement)
         {
-            return ConvertOperators(ConvertFloatLiterals(ConvertNamespaces(statement.TrimEnd(';'))));
+            return ConvertMemoryModel(ConvertOperators(ConvertFloatLiterals(ConvertNamespaces(statement.TrimEnd(';')))));
         }
 
         private static string ConvertStaticDeclaration(string declaration)
@@ -290,6 +294,13 @@ namespace Decompiler.Emitters
                 value = "nil";
             else if ((left.StartsWith("BOOL", StringComparison.OrdinalIgnoreCase) || left.StartsWith("bool", StringComparison.OrdinalIgnoreCase)) && value is "0" or "1")
                 value = value == "1" ? "true" : "false";
+
+            var lm = Regex.Match(varName, @"^[a-zA-Z]+Local_(\d+)$");
+            if (lm.Success)
+                return $"Local[{lm.Groups[1].Value}] = {value}";
+            var gm = Regex.Match(varName, @"^Global_(\d+)$");
+            if (gm.Success)
+                return $"Global[{gm.Groups[1].Value}] = {value}";
 
             return $"local {varName} = {value}";
         }
@@ -312,6 +323,68 @@ namespace Decompiler.Emitters
         private static string ConvertNamespaces(string input)
         {
             return input.Replace("::", ".");
+        }
+
+        private static string ConvertMemoryModel(string input)
+        {
+            string output = input;
+            output = Regex.Replace(output, @"&\(([^)]+)\)", "$1");
+            output = ReplaceMemoryRefs(output, true);
+            output = ReplaceMemoryRefs(output, false);
+            return output;
+        }
+
+        private static string ReplaceMemoryRefs(string input, bool local)
+        {
+            string prefix = local ? "Local" : "Global";
+            string pat = local ? @"\b[a-zA-Z]+Local_(\d+)((?:\.f_\d+)*)((?:\[[^\]]+\])?)" : @"\bGlobal_(\d+)((?:\.f_\d+)*)((?:\[[^\]]+\])?)";
+            return Regex.Replace(input, pat, m =>
+            {
+                int baseIdx = int.Parse(m.Groups[1].Value);
+                int sum = baseIdx;
+                foreach (Match fm in Regex.Matches(m.Groups[2].Value, @"\.f_(\d+)"))
+                    sum += int.Parse(fm.Groups[1].Value);
+
+                string expr = sum.ToString();
+                string arr = m.Groups[3].Value;
+                if (!string.IsNullOrEmpty(arr))
+                {
+                    var am = Regex.Match(arr, @"\[(.*?)\]");
+                    if (am.Success)
+                    {
+                        string inside = am.Groups[1].Value.Trim();
+                        var sm = Regex.Match(inside, @"^(.*?)\s*/\*\s*(\d+)\s*\*/\s*$");
+                        if (sm.Success)
+                        {
+                            string idx = sm.Groups[1].Value.Trim();
+                            string stride = sm.Groups[2].Value.Trim();
+                            expr += $" + ({idx} * {stride})";
+                        }
+                        else
+                        {
+                            expr += $" + {inside}";
+                        }
+                    }
+                }
+                return $"{prefix}[{expr}]";
+            });
+        }
+
+        private void EmitFunctionLocals(StringBuilder sb, Function func, int indent)
+        {
+            foreach (var decl in func.Vars.GetDeclaration())
+            {
+                string line = decl.Trim().TrimEnd(';');
+                int sp = line.LastIndexOf(' ');
+                if (sp < 0)
+                    continue;
+                string name = line[(sp + 1)..];
+                if (Regex.IsMatch(name, @"^[a-zA-Z]+Local_\d+$"))
+                    continue;
+                AppendLine(sb, indent, $"local {name}");
+            }
+            if (func.Vars.GetDeclaration().Count > 0)
+                sb.AppendLine();
         }
 
         private static void AppendLine(StringBuilder sb, int indent, string text)
