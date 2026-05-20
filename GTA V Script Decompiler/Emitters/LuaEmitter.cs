@@ -228,6 +228,8 @@ namespace Decompiler.Emitters
             string op = mCond.Groups[1].Value.Trim();
             string endExclusive = mCond.Groups[2].Value.Trim();
             string endExpr = op == "<=" ? endExclusive : $"{endExclusive} - 1";
+            if (endExpr.TrimStart().StartsWith("=", StringComparison.Ordinal))
+                endExpr = endExpr.TrimStart()[1..].TrimStart();
             AppendLine(sb, indent, $"for {varName} = {startExpr}, {endExpr} do");
             EmitTreeBody(sb, node, indent + 1, false);
             AppendLine(sb, indent, "end");
@@ -372,6 +374,7 @@ namespace Decompiler.Emitters
             output = output.Replace("!=", "~=");
             output = output.Replace("!", "not ");
             output = Regex.Replace(output, @"\b([A-Za-z_]\w*|\d+)\s*&\s*([A-Za-z_]\w*|\d+)\b", "BitAnd($1, $2)");
+            output = Regex.Replace(output, @"\b([A-Za-z_]\w*|\d+)\s*\|\s*([A-Za-z_]\w*|\d+)\b", "BitOr($1, $2)");
             return output;
         }
 
@@ -390,6 +393,7 @@ namespace Decompiler.Emitters
         private static string ConvertMemoryModel(string input)
         {
             string output = input;
+            output = ResolveComplexMemoryAccesses(output);
             output = ReplacePointerAssignments(output);
             output = ReplacePointerReads(output);
             output = Regex.Replace(output, @"&\s*Local\[(.+?)\]", "LocalRef($1)");
@@ -410,6 +414,17 @@ namespace Decompiler.Emitters
             output = output.Replace("(float)", "");
             output = Regex.Replace(output, @"RefGet\(([^)]+)\)\s*=\s*(.+)$", "RefSet($1, $2)");
             return output;
+        }
+
+        private static string ResolveComplexMemoryAccesses(string input)
+        {
+            // Resolve known nested ref/global/local expressions before regex fallback.
+            return Regex.Replace(input, @"[A-Za-z_]\w*(?:->|\.)f_\d+(?:\[[^\]]+\])+(?:\.f_\d+)*", m =>
+            {
+                if (TryParseMemoryAccess(m.Value, out var addr))
+                    return EmitMemoryRead(addr);
+                return m.Value;
+            });
         }
 
         private static string ReplacePointerAssignments(string input)
@@ -518,12 +533,16 @@ namespace Decompiler.Emitters
                 string stride = sm.Groups[2].Value.Trim();
                 return $"{idx} * {stride}";
             }
+            if (TryParseMemoryAccess(inside, out var addr))
+                return EmitMemoryRead(addr);
             return inside;
         }
 
         private static string ConvertRefExpression(string inner)
         {
             string mem = inner.Trim();
+            if (TryParseMemoryAccess(mem, out var parsedAddr))
+                return EmitMemoryRef(parsedAddr);
             var ptrAny = Regex.Match(mem, @"^([A-Za-z_]\w*)->((?:f_\d+\.)*f_\d+)?(\[[^\]]+\])?(?:\.f_(\d+))?$");
             if (ptrAny.Success)
             {
@@ -888,6 +907,12 @@ namespace Decompiler.Emitters
             sb.AppendLine("    return 0 -- fallback when no bit library is present");
             sb.AppendLine("end");
             sb.AppendLine();
+            sb.AppendLine("function BitOr(a, b)");
+            sb.AppendLine("    if bit32 and bit32.bor then return bit32.bor(a, b) end");
+            sb.AppendLine("    if bit and bit.bor then return bit.bor(a, b) end");
+            sb.AppendLine("    return (a or 0) + (b or 0)");
+            sb.AppendLine("end");
+            sb.AppendLine();
             sb.AppendLine("function RefGet(ref, offset)");
             sb.AppendLine("    offset = offset or 0");
             sb.AppendLine("    return ref.mem[ref.index + offset]");
@@ -995,6 +1020,122 @@ namespace Decompiler.Emitters
             MemoryKind.StructLocal => $"StructRef({a.BaseName}, {a.OffsetExpr.TrimStart('+',' ')})",
             _ => a.OffsetExpr
         };
+
+        private static bool TryParseMemoryAccess(string expr, out MemoryAddress addr)
+        {
+            addr = new MemoryAddress(MemoryKind.Unknown, "", "", expr, false);
+            string s = expr.Trim();
+            if (string.IsNullOrEmpty(s))
+                return false;
+
+            int i = 0;
+            string baseName = ReadIdent(s, ref i);
+            if (string.IsNullOrEmpty(baseName))
+                return false;
+
+            MemoryKind kind = baseName.StartsWith("Global_", StringComparison.Ordinal) ? MemoryKind.Global
+                : baseName.Contains("Local_", StringComparison.Ordinal) ? MemoryKind.Local
+                : MemoryKind.Ref;
+            string baseExpr = kind switch
+            {
+                MemoryKind.Global => "Global",
+                MemoryKind.Local => "Local",
+                _ => baseName
+            };
+            List<string> parts = new();
+            if (kind == MemoryKind.Global) parts.Add(baseName["Global_".Length..]);
+            else if (kind == MemoryKind.Local)
+            {
+                int p = baseName.LastIndexOf("Local_", StringComparison.Ordinal);
+                parts.Add(baseName[(p + "Local_".Length)..]);
+            }
+
+            while (i < s.Length)
+            {
+                if (s[i] == '-' && i + 1 < s.Length && s[i + 1] == '>')
+                {
+                    i += 2;
+                    if (i < s.Length && s[i] == '[')
+                    {
+                        string inside = ReadBracketContent(s, ref i);
+                        parts.Add(ConvertInlineArrayIndex(inside));
+                        continue;
+                    }
+                    if (MatchField(s, ref i, out var field))
+                    {
+                        parts.Add(field);
+                        continue;
+                    }
+                    return false;
+                }
+                if (s[i] == '.')
+                {
+                    i++;
+                    if (MatchField(s, ref i, out var field))
+                    {
+                        parts.Add(field);
+                        continue;
+                    }
+                    return false;
+                }
+                if (s[i] == '[')
+                {
+                    string inside = ReadBracketContent(s, ref i);
+                    parts.Add(ConvertInlineArrayIndex(inside));
+                    continue;
+                }
+                i++;
+            }
+
+            string off = string.Join(" + ", parts.FindAll(p => !string.IsNullOrWhiteSpace(p)));
+            if (string.IsNullOrWhiteSpace(off))
+                off = "0";
+            addr = new MemoryAddress(kind, baseExpr == "Global" || baseExpr == "Local" ? baseExpr : baseName, "0", off, true);
+            return true;
+        }
+
+        private static string ReadIdent(string s, ref int i)
+        {
+            int start = i;
+            while (i < s.Length && (char.IsLetterOrDigit(s[i]) || s[i] == '_')) i++;
+            return i > start ? s[start..i] : "";
+        }
+
+        private static bool MatchField(string s, ref int i, out string field)
+        {
+            field = "";
+            if (i + 2 >= s.Length || s[i] != 'f' || s[i + 1] != '_')
+                return false;
+            i += 2;
+            int st = i;
+            while (i < s.Length && char.IsDigit(s[i])) i++;
+            if (i == st) return false;
+            field = s[st..i];
+            return true;
+        }
+
+        private static string ReadBracketContent(string s, ref int i)
+        {
+            int depth = 0;
+            int start = i + 1;
+            i++;
+            while (i < s.Length)
+            {
+                if (s[i] == '[') depth++;
+                else if (s[i] == ']')
+                {
+                    if (depth == 0)
+                    {
+                        string content = s[start..i];
+                        i++;
+                        return content;
+                    }
+                    depth--;
+                }
+                i++;
+            }
+            return "";
+        }
 
         private static string NormalizeResolvedArtifacts(string input)
         {
