@@ -20,7 +20,7 @@ namespace Decompiler.Emitters
         public string EmitFunction(Function func)
         {
             StringBuilder sb = new();
-            sb.AppendLine($"function {func.Name}()") ;
+            sb.AppendLine($"function {func.Name}({GetFunctionParamList(func)})") ;
             EmitFunctionLocals(sb, func, 1);
             EmitTreeBody(sb, func.MainTree, 1, false);
             sb.AppendLine("end");
@@ -350,7 +350,7 @@ namespace Decompiler.Emitters
             string output = input;
 
             // uParam0->f_1.f_2[expr /*stride*/] = value  => RefSet(uParam0, value, offsetExpr)
-            output = Regex.Replace(output, @"\b([A-Za-z_]\w*)->((?:f_\d+\.)*f_\d+)(\[[^\]]+\])?\s*=\s*(.+)$", m =>
+            output = Regex.Replace(output, @"\b([A-Za-z_]\w*)->((?:f_\d+\.)*f_\d+)(\[[^\]]+\])?\s*(?<![=!<>])=(?!=)\s*(.+)$", m =>
             {
                 string ptr = m.Groups[1].Value;
                 string fields = m.Groups[2].Value;
@@ -361,7 +361,7 @@ namespace Decompiler.Emitters
             });
 
             // *uParam0 = value  => RefSet(uParam0, value)
-            output = Regex.Replace(output, @"^\*([A-Za-z_]\w*)\s*=\s*(.+)$", "RefSet($1, $2)");
+            output = Regex.Replace(output, @"^\*([A-Za-z_]\w*)\s*(?<![=!<>])=(?!=)\s*(.+)$", "RefSet($1, $2)");
             return output;
         }
 
@@ -475,6 +475,21 @@ namespace Decompiler.Emitters
             }
             if (func.Vars.GetDeclaration().Count > 0)
                 sb.AppendLine();
+        }
+
+        private static string GetFunctionParamList(Function func)
+        {
+            List<string> names = new();
+            for (int i = 0; i < func.Params.Vars.Count; i++)
+            {
+                var param = func.Params.Vars[i];
+                if (!param.Is_Used)
+                    continue;
+                string name = string.IsNullOrEmpty(param.Name) ? func.Params.GetVarName((uint)i) : param.Name;
+                names.Add(name);
+            }
+
+            return string.Join(", ", names);
         }
 
         private static string ConvertStoreN(StoreN storeN)
