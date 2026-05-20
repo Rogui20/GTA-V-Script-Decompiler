@@ -363,6 +363,9 @@ namespace Decompiler.Emitters
             output = Regex.Replace(output, @"&\(([^)]+)\)", m => ConvertRefExpression(m.Groups[1].Value));
             output = ReplaceMemoryRefs(output, true);
             output = ReplaceMemoryRefs(output, false);
+            // Final pass: after memory lowering we may still have &Local[...] / &Global[...] in nested call arguments.
+            output = Regex.Replace(output, @"&\s*Local\[(.+?)\]", "LocalRef($1)");
+            output = Regex.Replace(output, @"&\s*Global\[(.+?)\]", "GlobalRef($1)");
             return output;
         }
 
@@ -534,6 +537,21 @@ namespace Decompiler.Emitters
                 ? string.Join(", ", values.ConvertAll(ConvertExpression))
                 : ConvertStatement(storeN.ToString());
             string? countExpr = cnt != null ? ConvertExpressionFromObject(cnt) : null;
+
+            // Fallback for static-pointer StoreN where pointer token does not stringify as Local[...] directly.
+            // Example debug case:
+            //   input text: iLocal_962 = { func_112() };
+            //   output:     StoreN(Local, 962, 2, func_112())
+            if (baseExpr == null && ptr?.GetType().Name == "Static")
+            {
+                var text = storeN.ToString();
+                var m = Regex.Match(text, @"\b[a-zA-Z]+Local_(\d+)\s*=\s*\{\s*(.+?)\s*\};$");
+                if (m.Success)
+                {
+                    baseExpr = m.Groups[1].Value;
+                    valueExpr = ConvertStatement(m.Groups[2].Value);
+                }
+            }
 
             if (baseExpr == null)
                 return $"-- TODO StoreN unsupported: ptr={ptr?.GetType().Name}, count={countExpr}, text={storeN}";
