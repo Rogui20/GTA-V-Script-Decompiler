@@ -21,11 +21,22 @@ namespace Decompiler.Emitters
         private enum MemoryKind { Local, Global, Ref, StructLocal, Unknown }
         private record MemoryAddress(MemoryKind Kind, string BaseName, string BaseIndex, string OffsetExpr, bool IsAddressable);
 
+        private class LuaAnalysisContext
+        {
+            public HashSet<string> StructLocals { get; } = new();
+            public Dictionary<string, int> StructLocalMinSize { get; } = new();
+            public HashSet<string> VectorLocals { get; } = new();
+            public HashSet<string> RefParams { get; } = new();
+            public Dictionary<string, int> FunctionReturnCount { get; } = new();
+        }
+
+        private LuaAnalysisContext analysis = new();
+
         public string EmitFunction(Function func)
         {
             StringBuilder sb = new();
             sb.AppendLine($"function {func.Name}({GetFunctionParamList(func)})") ;
-            EmitFunctionLocals(sb, func, 1);
+            EmitFunctionLocals(sb, func, 1, analysis);
             EmitTreeBody(sb, func.MainTree, 1, false);
             sb.AppendLine("end");
             return sb.ToString();
@@ -33,6 +44,7 @@ namespace Decompiler.Emitters
 
         public string EmitScript(ScriptFile file)
         {
+            AnalyzeScript(file);
             StringBuilder sb = new();
             sb.AppendLine("Local = Local or {}");
             sb.AppendLine("Global = Global or {}");
@@ -578,9 +590,8 @@ namespace Decompiler.Emitters
             return $" + {inside}";
         }
 
-        private void EmitFunctionLocals(StringBuilder sb, Function func, int indent)
+        private void EmitFunctionLocals(StringBuilder sb, Function func, int indent, LuaAnalysisContext ctx)
         {
-            vectorLocals.Clear();
             foreach (var decl in func.Vars.GetDeclaration())
             {
                 string line = decl.Trim().TrimEnd(';');
@@ -590,6 +601,17 @@ namespace Decompiler.Emitters
                 string name = line[(sp + 1)..];
                 if (Regex.IsMatch(name, @"^[a-zA-Z]+Local_\d+$"))
                     continue;
+                if (ctx.StructLocals.Contains(name))
+                {
+                    int size = ctx.StructLocalMinSize.TryGetValue(name, out var sz) ? Math.Max(sz, 1) : 1;
+                    AppendLine(sb, indent, $"local {name} = StructVar({size})");
+                    continue;
+                }
+                if (ctx.VectorLocals.Contains(name))
+                {
+                    AppendLine(sb, indent, $"local {name} = Vec3()");
+                    continue;
+                }
                 AppendLine(sb, indent, $"local {name}");
             }
             if (func.Vars.GetDeclaration().Count > 0)
@@ -751,6 +773,44 @@ namespace Decompiler.Emitters
             return obj.ToString() ?? "";
         }
 
+
+        private void AnalyzeScript(ScriptFile file)
+        {
+            analysis = new LuaAnalysisContext();
+            foreach (var func in file.Functions)
+            {
+                analysis.FunctionReturnCount[func.Name] = func.NumReturns;
+                AnalyzeFunction(func, analysis);
+            }
+            vectorLocals.Clear();
+            foreach (var v in analysis.VectorLocals)
+                vectorLocals.Add(v);
+        }
+
+        private static void AnalyzeFunction(Function func, LuaAnalysisContext ctx)
+        {
+            string text = func.ToString();
+            foreach (Match m in Regex.Matches(text, @"([A-Za-z_]\w*)\.f_(\d+)(?:\[(.*?)\])?"))
+            {
+                string name = m.Groups[1].Value;
+                int idx = int.Parse(m.Groups[2].Value);
+                ctx.StructLocals.Add(name);
+                if (!ctx.StructLocalMinSize.ContainsKey(name) || ctx.StructLocalMinSize[name] < idx + 1)
+                    ctx.StructLocalMinSize[name] = idx + 1;
+            }
+            foreach (Match m in Regex.Matches(text, @"([A-Za-z_]\w+)\s*=\s*\{\s*"))
+            {
+                // conservative signal for vector/struct assignment from StoreN text form
+                if (!ctx.StructLocals.Contains(m.Groups[1].Value))
+                    ctx.VectorLocals.Add(m.Groups[1].Value);
+            }
+            foreach (Match m in Regex.Matches(text, @"([A-Za-z_]\w+)->|\*([A-Za-z_]\w+)"))
+            {
+                string n = m.Groups[1].Success ? m.Groups[1].Value : m.Groups[2].Value;
+                if (n.StartsWith("uParam") || n.StartsWith("iParam") || n.StartsWith("pParam"))
+                    ctx.RefParams.Add(n);
+            }
+        }
         private static void EmitRuntimeHelpers(StringBuilder sb)
         {
             sb.AppendLine("-- Vector3 returns are emitted as Lua multi-return x, y, z.");
