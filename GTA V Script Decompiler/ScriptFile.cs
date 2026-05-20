@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
+using Decompiler.Emitters;
 
 namespace Decompiler
 {
@@ -79,46 +80,27 @@ namespace Decompiler
             }
         }
 
-        public void Save(string filename)
+        public void Save(string filename, bool emitLua = false)
         {
             Stream savefile = File.Create(filename);
-            Save(savefile, true);
+            Save(savefile, true, emitLua);
         }
 
-        public void Save(Stream stream, bool close = false)
+        public void Save(Stream stream, bool close = false, bool emitLua = false)
         {
-            var i = 1;
+            // Backend dispatch point: future emitters can be plugged here without touching decompile/AST generation.
+            IEmitter emitter = emitLua ? new LuaEmitter() : new CEmitter();
+
             StreamWriter savestream = new(stream);
+            string scriptText = emitter.EmitScript(this);
+            savestream.Write(scriptText);
 
-            if (Header.GlobalsCount > 0)
-            {
-                savestream.WriteLine($"// Program registers {Header.GlobalsCount & 0x3FFFF} globals at index {Header.GlobalsCount >> 18} starting from Global_{0x40000 * (Header.GlobalsCount >> 18)}");
-                i++;
-            }
-
-            if (Properties.Settings.Default.DeclareVariables)
-            {
-                if (Header.StaticsCount > 0)
-                {
-                    savestream.WriteLine("#region Local Var");
-                    i++;
-                    foreach (var s in Statics.GetDeclaration())
-                    {
-                        savestream.WriteLine("\t" + s);
-                        i++;
-                    }
-
-                    savestream.WriteLine("#endregion");
-                    savestream.WriteLine("");
-                    i += 2;
-                }
-            }
-
+            // Keep FunctionLines population behavior for existing UI code paths.
+            FunctionLines.Clear();
+            var i = 1;
             foreach (var f in Functions)
             {
-                var s = f.ToString();
-                savestream.WriteLine(s);
-                FunctionLines.Add(f, i);
+                FunctionLines[f] = i;
                 i += f.LineCount;
             }
 
