@@ -18,6 +18,9 @@ namespace Decompiler.Emitters
         private int switchTempIndex = 0;
         private readonly HashSet<string> vectorLocals = new();
 
+        private enum MemoryKind { Local, Global, Ref, StructLocal, Unknown }
+        private record MemoryAddress(MemoryKind Kind, string BaseName, string BaseIndex, string OffsetExpr, bool IsAddressable);
+
         public string EmitFunction(Function func)
         {
             StringBuilder sb = new();
@@ -58,7 +61,7 @@ namespace Decompiler.Emitters
             if (warns.Length > 0)
             {
                 StringBuilder wb = new();
-                wb.AppendLine("-- LUA_EMITTER_WARNINGS:");
+                wb.AppendLine("-- LUA_EMITTER_FATAL_PATTERNS_FOUND");
                 foreach (var w in warns) wb.AppendLine($"-- found invalid token: {w}");
                 wb.AppendLine();
                 wb.Append(result);
@@ -855,6 +858,81 @@ namespace Decompiler.Emitters
             sb.AppendLine();
         }
 
+
+        private static MemoryAddress TryResolveMemoryAddress(string expr)
+        {
+            string e = expr.Trim();
+            var mRef = Regex.Match(e, @"^([A-Za-z_]\w*)->(.*)$");
+            if (mRef.Success)
+            {
+                var off = ParseOffset(mRef.Groups[2].Value);
+                return new MemoryAddress(MemoryKind.Ref, mRef.Groups[1].Value, "0", off, true);
+            }
+
+            var mG = Regex.Match(e, @"^Global_(\d+)(.*)$");
+            if (mG.Success)
+            {
+                var off = mG.Groups[1].Value + ParseOffset(mG.Groups[2].Value, prependPlus:true);
+                return new MemoryAddress(MemoryKind.Global, "Global", "0", off, true);
+            }
+
+            var mL = Regex.Match(e, @"^[a-zA-Z]+Local_(\d+)(.*)$");
+            if (mL.Success)
+            {
+                var off = mL.Groups[1].Value + ParseOffset(mL.Groups[2].Value, prependPlus:true);
+                return new MemoryAddress(MemoryKind.Local, "Local", "0", off, true);
+            }
+
+            var mStruct = Regex.Match(e, @"^([A-Za-z_]\w*)\.(.*)$");
+            if (mStruct.Success && mStruct.Groups[2].Value.StartsWith("f_"))
+            {
+                var off = ParseOffset("." + mStruct.Groups[2].Value).TrimStart().TrimStart('+').Trim();
+                return new MemoryAddress(MemoryKind.StructLocal, mStruct.Groups[1].Value, "0", off, true);
+            }
+
+            return new MemoryAddress(MemoryKind.Unknown, "", "", expr, false);
+        }
+
+        private static string ParseOffset(string suffix, bool prependPlus=false)
+        {
+            string rem = suffix;
+            List<string> parts = new();
+            foreach (Match f in Regex.Matches(rem, @"\.f_(\d+)")) parts.Add(f.Groups[1].Value);
+            foreach (Match a in Regex.Matches(rem, @"\[(.*?)\]"))
+            {
+                string inside=a.Groups[1].Value.Trim();
+                var sm=Regex.Match(inside,@"^(.*?)\s*/\*\s*(\d+)\s*\*/\s*$");
+                if(sm.Success) parts.Add($"({sm.Groups[1].Value.Trim()} * {sm.Groups[2].Value.Trim()})");
+                else parts.Add(inside);
+            }
+            if(parts.Count==0) return "";
+            return (prependPlus?" + ":"") + string.Join(" + ", parts);
+        }
+
+        private static string EmitMemoryRead(MemoryAddress a) => a.Kind switch
+        {
+            MemoryKind.Local => $"Local[{a.OffsetExpr}]",
+            MemoryKind.Global => $"Global[{a.OffsetExpr}]",
+            MemoryKind.Ref => $"RefGet({a.BaseName}, {a.OffsetExpr.TrimStart('+',' ')})",
+            MemoryKind.StructLocal => $"{a.BaseName}[{a.OffsetExpr.TrimStart('+',' ')}]",
+            _ => a.OffsetExpr
+        };
+        private static string EmitMemoryWrite(MemoryAddress a, string value) => a.Kind switch
+        {
+            MemoryKind.Local => $"Local[{a.OffsetExpr}] = {value}",
+            MemoryKind.Global => $"Global[{a.OffsetExpr}] = {value}",
+            MemoryKind.Ref => $"RefSet({a.BaseName}, {value}, {a.OffsetExpr.TrimStart('+',' ')})",
+            MemoryKind.StructLocal => $"{a.BaseName}[{a.OffsetExpr.TrimStart('+',' ')}] = {value}",
+            _ => $"-- TODO memory write unsupported: {value}"
+        };
+        private static string EmitMemoryRef(MemoryAddress a) => a.Kind switch
+        {
+            MemoryKind.Local => $"LocalRef({a.OffsetExpr})",
+            MemoryKind.Global => $"GlobalRef({a.OffsetExpr})",
+            MemoryKind.Ref => $"RefAt({a.BaseName}, {a.OffsetExpr.TrimStart('+',' ')})",
+            MemoryKind.StructLocal => $"StructRef({a.BaseName}, {a.OffsetExpr.TrimStart('+',' ')})",
+            _ => a.OffsetExpr
+        };
         private static string[] BuildWarnings(string text)
         {
             List<string> w = new();
@@ -862,6 +940,11 @@ namespace Decompiler.Emitters
             if (text.Contains("/*")) w.Add("/*");
             if (text.Contains("&")) w.Add("&");
             if (Regex.IsMatch(text, @"RefGet\([^\)]*\)\s*=")) w.Add("RefGet() =");
+            if (Regex.IsMatch(text, @"RefGet\([^\)]*\)\s*\[")) w.Add("RefGet(...)[");
+            if (Regex.IsMatch(text, @"RefGet\([^\)]*\)\.")) w.Add("RefGet(...).");
+            if (Regex.IsMatch(text, @"Global\[[^\]]+\]\.")) w.Add("Global[...].");
+            if (Regex.IsMatch(text, @"Local\[[^\]]+\]\.")) w.Add("Local[...].");
+            if (Regex.IsMatch(text, @"for\s+\w+\s*=\s*[^\n]*,\s*=")) w.Add("for i = 0, =");
             if (text.Contains(".f_")) w.Add(".f_");
             return w.ToArray();
         }
