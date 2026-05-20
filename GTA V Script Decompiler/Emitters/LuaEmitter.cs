@@ -113,8 +113,7 @@ namespace Decompiler.Emitters
         private void EmitSwitch(StringBuilder sb, Switch node, int indent)
         {
             string tempVar = $"__switch_{switchTempIndex++}";
-            AppendLine(sb, indent, "do");
-            AppendLine(sb, indent + 1, $"local {tempVar} = {ConvertExpression(node.SwitchVal)}");
+            AppendLine(sb, indent, $"local {tempVar} = {ConvertExpression(node.SwitchVal)}");
 
             bool first = true;
             Case? defaultCase = null;
@@ -137,20 +136,19 @@ namespace Decompiler.Emitters
                 // First label in case block drives the if/elseif guard.
                 AstToken firstLabel = caseLabels[0];
                 string guard = $"{tempVar} == {ConvertExpression(firstLabel)}";
-                AppendLine(sb, indent + 1, first ? $"if {guard} then" : $"elseif {guard} then");
-                EmitTreeBody(sb, c, indent + 2, true);
+                AppendLine(sb, indent, first ? $"if {guard} then" : $"elseif {guard} then");
+                EmitTreeBody(sb, c, indent + 1, true);
                 first = false;
             }
 
             if (defaultCase != null)
             {
-                AppendLine(sb, indent + 1, first ? "if true then" : "else");
-                EmitTreeBody(sb, defaultCase, indent + 2, true);
+                AppendLine(sb, indent, first ? "if true then" : "else");
+                EmitTreeBody(sb, defaultCase, indent + 1, true);
             }
 
             if (!first || defaultCase != null)
-                AppendLine(sb, indent + 1, "end");
-            AppendLine(sb, indent, "end");
+                AppendLine(sb, indent, "end");
         }
 
         private void EmitFor(StringBuilder sb, For node, int indent)
