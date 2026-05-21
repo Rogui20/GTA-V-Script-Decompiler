@@ -360,6 +360,11 @@ namespace Decompiler.Emitters
             return NormalizeResolvedArtifacts(ConvertMemoryModel(ConvertOperators(ConvertFloatLiterals(ConvertNamespaces(value.TrimEnd(';'))))));
         }
 
+        private static string ConvertExpression(string value)
+        {
+            return NormalizeResolvedArtifacts(ConvertMemoryModel(ConvertOperators(ConvertFloatLiterals(ConvertNamespaces(value.TrimEnd(';'))))));
+        }
+
         private static string ConvertNativeExpression(NativeCall call)
         {
             string c = call.ToString();
