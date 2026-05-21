@@ -371,7 +371,11 @@ namespace Decompiler.Emitters
 
         private static string ConvertStatement(string statement)
         {
-            var converted = NormalizeResolvedArtifacts(ConvertMemoryModel(ConvertOperators(ConvertFloatLiterals(ConvertNamespaces(statement.TrimEnd(';'))))));
+            string trimmed = statement.TrimEnd(';');
+            string? memAssign = TryConvertMemoryAssignment(trimmed);
+            var converted = memAssign is not null
+                ? NormalizeResolvedArtifacts(ConvertMemoryModel(ConvertOperators(ConvertFloatLiterals(ConvertNamespaces(memAssign)))))
+                : NormalizeResolvedArtifacts(ConvertMemoryModel(ConvertOperators(ConvertFloatLiterals(ConvertNamespaces(trimmed)))));
             if (IsNoOpExpressionStatement(converted))
             {
                 if (Regex.IsMatch(converted, @"^(Local\[.+\]|Global\[.+\]|RefGet\(.+\)|\w+\[\d+.*\])$"))
@@ -381,6 +385,43 @@ namespace Decompiler.Emitters
                 return $"-- ignored no-op expression: {converted}";
             }
             return converted;
+        }
+
+        private static string? TryConvertMemoryAssignment(string statement)
+        {
+            if (!TrySplitSimpleAssignment(statement, out var lhs, out var rhs))
+                return null;
+            if (!TryParseMemoryAccess(lhs, out var addr))
+                return null;
+            return EmitMemoryWrite(addr, ConvertExpression(rhs));
+        }
+
+        private static bool TrySplitSimpleAssignment(string input, out string lhs, out string rhs)
+        {
+            lhs = "";
+            rhs = "";
+            int depthParen = 0, depthBracket = 0, depthBrace = 0;
+            for (int i = 0; i < input.Length; i++)
+            {
+                char c = input[i];
+                if (c == '(') depthParen++;
+                else if (c == ')') depthParen = Math.Max(0, depthParen - 1);
+                else if (c == '[') depthBracket++;
+                else if (c == ']') depthBracket = Math.Max(0, depthBracket - 1);
+                else if (c == '{') depthBrace++;
+                else if (c == '}') depthBrace = Math.Max(0, depthBrace - 1);
+                else if (c == '=' && depthParen == 0 && depthBracket == 0 && depthBrace == 0)
+                {
+                    char prev = i > 0 ? input[i - 1] : '\0';
+                    char next = i + 1 < input.Length ? input[i + 1] : '\0';
+                    if (prev is '=' or '!' or '<' or '>' or '~' || next == '=')
+                        continue;
+                    lhs = input[..i].Trim();
+                    rhs = input[(i + 1)..].Trim();
+                    return lhs.Length > 0 && rhs.Length > 0;
+                }
+            }
+            return false;
         }
 
         private static bool IsNoOpExpressionStatement(string expr)
@@ -631,6 +672,13 @@ namespace Decompiler.Emitters
         private static string ConvertRefExpression(string inner)
         {
             string mem = inner.Trim();
+            var rm = Regex.Match(mem, @"^RefGet\((.+?)(?:,\s*(.+))?\)$");
+            if (rm.Success)
+            {
+                string ptr = rm.Groups[1].Value.Trim();
+                string off = rm.Groups[2].Success ? rm.Groups[2].Value.Trim() : "0";
+                return $"RefAt({ptr}, {off})";
+            }
             if (TryParseMemoryAccess(mem, out var parsedAddr))
                 return EmitMemoryRef(parsedAddr);
             var ptrAny = Regex.Match(mem, @"^([A-Za-z_]\w*)->((?:f_\d+\.)*f_\d+)?(\[[^\]]+\])?(?:\.f_(\d+))?$");
@@ -1118,7 +1166,9 @@ namespace Decompiler.Emitters
         {
             MemoryKind.Local => $"Local[{a.OffsetExpr}] = {value}",
             MemoryKind.Global => $"Global[{a.OffsetExpr}] = {value}",
-            MemoryKind.Ref => $"RefSet({a.BaseName}, {value}, {a.OffsetExpr.TrimStart('+', ' ')})",
+            MemoryKind.Ref => string.IsNullOrWhiteSpace(a.OffsetExpr) || a.OffsetExpr.Trim() == "0"
+                ? $"RefSet({a.BaseName}, {value})"
+                : $"RefSet({a.BaseName}, {value}, {a.OffsetExpr.TrimStart('+', ' ')})",
             MemoryKind.StructLocal => $"{a.BaseName}[{a.OffsetExpr.TrimStart('+', ' ')}] = {value}",
             _ => $"-- TODO memory write unsupported: {value}"
         };
