@@ -378,12 +378,12 @@ namespace Decompiler.Emitters
 
         private static string ConvertStatement(string statement)
         {
-            statement = StripInlineCComments(statement);
             string trimmed = statement.TrimEnd(';');
             string? memAssign = TryConvertMemoryAssignment(trimmed);
+            string sanitized = StripInlineCComments(trimmed);
             var converted = memAssign is not null
                 ? NormalizeResolvedArtifacts(ConvertMemoryModel(ConvertOperators(ConvertFloatLiterals(ConvertNamespaces(memAssign)))))
-                : NormalizeResolvedArtifacts(ConvertMemoryModel(ConvertOperators(ConvertFloatLiterals(ConvertNamespaces(trimmed)))));
+                : NormalizeResolvedArtifacts(ConvertMemoryModel(ConvertOperators(ConvertFloatLiterals(ConvertNamespaces(sanitized)))));
             if (IsNoOpExpressionStatement(converted))
             {
                 if (Regex.IsMatch(converted, @"^(Local\[.+\]|Global\[.+\]|RefGet\(.+\)|\w+\[\d+.*\])$"))
