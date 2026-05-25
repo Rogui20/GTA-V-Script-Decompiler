@@ -357,11 +357,13 @@ namespace Decompiler.Emitters
             string value = token is NativeCall native
                 ? ConvertNativeExpression(native)
                 : token.ToString();
+            value = StripInlineCComments(value);
             return NormalizeResolvedArtifacts(ConvertMemoryModel(ConvertOperators(ConvertFloatLiterals(ConvertNamespaces(value.TrimEnd(';'))))));
         }
 
         private static string ConvertExpression(string value)
         {
+            value = StripInlineCComments(value);
             return NormalizeResolvedArtifacts(ConvertMemoryModel(ConvertOperators(ConvertFloatLiterals(ConvertNamespaces(value.TrimEnd(';'))))));
         }
 
@@ -376,6 +378,7 @@ namespace Decompiler.Emitters
 
         private static string ConvertStatement(string statement)
         {
+            statement = StripInlineCComments(statement);
             string trimmed = statement.TrimEnd(';');
             string? memAssign = TryConvertMemoryAssignment(trimmed);
             var converted = memAssign is not null
@@ -506,6 +509,7 @@ namespace Decompiler.Emitters
 
         private static string ConvertMemoryModel(string input)
         {
+            input = StripInlineCComments(input);
             string output = input;
             output = Regex.Replace(output, @"&\(\s*([A-Za-z_]\w*)->((?:f_\d+\.)*f_\d+)(\[[^\]]+\])?\s*\)", m =>
             {
@@ -532,7 +536,6 @@ namespace Decompiler.Emitters
             output = Regex.Replace(output, @"\b(vParam\w*|outPosition|unk\d+)\.f_2\b", "$1.z");
             output = Regex.Replace(output, @"BUILTIN\.VMAG\(([^)]+)\)", "BUILTIN.VMAG(VecUnpack($1))");
             output = Regex.Replace(output, @"BUILTIN\.VDIST2?\(([^,]+),\s*([^)]+)\)", "BUILTIN.VDIST($1, $2)");
-            output = output.Replace("/*", "--").Replace("*/", "");
             output = output.Replace("(float)", "");
             return output;
         }
@@ -1155,6 +1158,7 @@ namespace Decompiler.Emitters
 
         private static MemoryAddress TryResolveMemoryAddress(string expr)
         {
+            expr = StripInlineCComments(expr);
             string e = expr.Trim();
             var mRef = Regex.Match(e, @"^([A-Za-z_]\w*)->(.*)$");
             if (mRef.Success)
@@ -1232,6 +1236,7 @@ namespace Decompiler.Emitters
 
         private static bool TryParseMemoryAccess(string expr, out MemoryAddress addr)
         {
+            expr = StripInlineCComments(expr);
             addr = new MemoryAddress(MemoryKind.Unknown, "", "", expr, false);
             string s = expr.Trim();
             if (string.IsNullOrEmpty(s))
@@ -1312,6 +1317,13 @@ namespace Decompiler.Emitters
                 off = "0";
             addr = new MemoryAddress(kind, baseExpr == "Global" || baseExpr == "Local" ? baseExpr : baseName, "0", off, true);
             return true;
+        }
+
+        private static string StripInlineCComments(string s)
+        {
+            if (string.IsNullOrEmpty(s))
+                return s;
+            return Regex.Replace(s, @"/\*.*?\*/", "");
         }
 
         private static string ReadIdent(string s, ref int i)
