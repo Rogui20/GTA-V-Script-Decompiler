@@ -103,7 +103,7 @@ namespace Decompiler.Emitters
                 {
                     errorCount++;
                     skippedStatements++;
-                    AppendLine(sb, indent, "-- TODO failed to convert block");
+                    AppendLine(sb, indent, $"-- TODO failed statement: {SanitizeTodoText(statement?.ToString() ?? "<unknown>")}");
                 }
             }
         }
@@ -133,7 +133,7 @@ namespace Decompiler.Emitters
                     {
                         errorCount++;
                         skippedStatements++;
-                        AppendLine(sb, indent, $"-- TODO failed to convert statement: {SanitizeTodoText(token.ToString())}");
+                        AppendLine(sb, indent, $"-- TODO failed statement: {SanitizeTodoText(token.ToString())}");
                     }
                     break;
                 case Tree nested:
@@ -507,6 +507,14 @@ namespace Decompiler.Emitters
         private static string ConvertMemoryModel(string input)
         {
             string output = input;
+            output = Regex.Replace(output, @"&\(\s*([A-Za-z_]\w*)->((?:f_\d+\.)*f_\d+)(\[[^\]]+\])?\s*\)", m =>
+            {
+                string ptr = m.Groups[1].Value;
+                string fields = m.Groups[2].Value;
+                string arr = m.Groups[3].Success ? m.Groups[3].Value : "";
+                string offset = BuildOffsetExpr(fields, arr);
+                return $"RefAt({ptr}, {offset})";
+            });
             output = ResolveComplexMemoryAccesses(output);
             output = ResolveMemoryAssignment(output);
             output = ReplacePointerReads(output);
@@ -537,6 +545,8 @@ namespace Decompiler.Emitters
 
             string left = m.Groups[1].Value.Trim();
             string right = m.Groups[2].Value.Trim();
+            if (Regex.IsMatch(left, @"^[A-Za-z_]\w*$"))
+                return input;
             if (TryResolveMemoryAddress(left) is MemoryAddress addr)
             {
                 return addr.Kind switch
