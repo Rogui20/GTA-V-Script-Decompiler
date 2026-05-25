@@ -1208,8 +1208,19 @@ namespace Decompiler.Emitters
             if (string.IsNullOrEmpty(baseName))
                 return false;
 
-            MemoryKind kind = baseName.StartsWith("Global_", StringComparison.Ordinal) ? MemoryKind.Global
-                : baseName.Contains("Local_", StringComparison.Ordinal) ? MemoryKind.Local
+            bool isGlobalBase = baseName.StartsWith("Global_", StringComparison.Ordinal);
+            bool isLocalBase = Regex.IsMatch(baseName, @"^[A-Za-z]+Local_\d+$");
+            bool hasRefAccessor = s.Contains("->", StringComparison.Ordinal)
+                || s.Contains(".f_", StringComparison.Ordinal)
+                || s.Contains("[", StringComparison.Ordinal);
+
+            // Bare identifiers are normal local variables and must stay as plain assignments.
+            // RefSet is only valid for explicit memory access forms (uParam->f_X, ptr[idx], etc.).
+            if (!isGlobalBase && !isLocalBase && !hasRefAccessor)
+                return false;
+
+            MemoryKind kind = isGlobalBase ? MemoryKind.Global
+                : isLocalBase ? MemoryKind.Local
                 : MemoryKind.Ref;
             string baseExpr = kind switch
             {
