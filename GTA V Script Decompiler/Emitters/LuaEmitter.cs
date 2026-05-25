@@ -542,7 +542,7 @@ namespace Decompiler.Emitters
 
         private static string ResolveMemoryAssignment(string input)
         {
-            var m = Regex.Match(input, @"^\s*(.+?)\s*(?<![=!<>])=(?!=)\s*(.+)\s*$");
+            var m = Regex.Match(input, @"^\s*(.+?)\s*(?<![=!<>~])=(?!=)\s*(.+)\s*$");
             if (!m.Success)
                 return ReplacePointerAssignments(input);
 
@@ -580,13 +580,13 @@ namespace Decompiler.Emitters
 
 
             // uParam1->[i /*5*/].f_1 = v
-            output = Regex.Replace(output, @"\b([A-Za-z_]\w*)->\[(.*?)\]\.f_(\d+)\s*(?<![=!<>])=(?!=)\s*(.+)$", m =>
+            output = Regex.Replace(output, @"\b([A-Za-z_]\w*)->\[(.*?)\]\.f_(\d+)\s*(?<![=!<>~])=(?!=)\s*(.+)$", m =>
             {
                 string ptr = m.Groups[1].Value; string idx = ConvertInlineArrayIndex(m.Groups[2].Value.Trim()); string f = m.Groups[3].Value; string v = m.Groups[4].Value;
                 return $"RefSet({ptr}, {v}, ({idx}) + {f})";
             });
             // uParam1->f_221[i /*5*/].f_1 = v
-            output = Regex.Replace(output, @"\b([A-Za-z_]\w*)->((?:f_\d+\.)*)\[(.*?)\]\.f_(\d+)\s*(?<![=!<>])=(?!=)\s*(.+)$", m =>
+            output = Regex.Replace(output, @"\b([A-Za-z_]\w*)->((?:f_\d+\.)*)\[(.*?)\]\.f_(\d+)\s*(?<![=!<>~])=(?!=)\s*(.+)$", m =>
             {
                 string ptr = m.Groups[1].Value; string pre = m.Groups[2].Value; string idx = ConvertInlineArrayIndex(m.Groups[3].Value.Trim()); string f = m.Groups[4].Value; string v = m.Groups[5].Value;
                 string preOff = BuildOffsetExpr(pre + "f_0", "").Replace(" + 0", "").Trim();
@@ -594,7 +594,7 @@ namespace Decompiler.Emitters
                 return $"RefSet({ptr}, {v}, {off} + {f})";
             });
             // uParam0->f_1.f_2[expr /*stride*/] = value  => RefSet(uParam0, value, offsetExpr)
-            output = Regex.Replace(output, @"\b([A-Za-z_]\w*)->((?:f_\d+\.)*f_\d+)(\[[^\]]+\])?\s*(?<![=!<>])=(?!=)\s*(.+)$", m =>
+            output = Regex.Replace(output, @"\b([A-Za-z_]\w*)->((?:f_\d+\.)*f_\d+)(\[[^\]]+\])?\s*(?<![=!<>~])=(?!=)\s*(.+)$", m =>
             {
                 string ptr = m.Groups[1].Value;
                 string fields = m.Groups[2].Value;
@@ -605,7 +605,7 @@ namespace Decompiler.Emitters
             });
 
             // *uParam0 = value  => RefSet(uParam0, value)
-            output = Regex.Replace(output, @"^\*([A-Za-z_]\w*)\s*(?<![=!<>])=(?!=)\s*(.+)$", "RefSet($1, $2)");
+            output = Regex.Replace(output, @"^\*([A-Za-z_]\w*)\s*(?<![=!<>~])=(?!=)\s*(.+)$", "RefSet($1, $2)");
             return output;
         }
 
