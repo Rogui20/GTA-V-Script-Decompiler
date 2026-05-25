@@ -1236,7 +1236,6 @@ namespace Decompiler.Emitters
 
         private static bool TryParseMemoryAccess(string expr, out MemoryAddress addr)
         {
-            expr = StripInlineCComments(expr);
             addr = new MemoryAddress(MemoryKind.Unknown, "", "", expr, false);
             string s = expr.Trim();
             if (string.IsNullOrEmpty(s))
@@ -1283,7 +1282,10 @@ namespace Decompiler.Emitters
                     if (i < s.Length && s[i] == '[')
                     {
                         string inside = ReadBracketContent(s, ref i);
-                        parts.Add(ConvertInlineArrayIndex(inside));
+                        if (kind is MemoryKind.Global or MemoryKind.Local)
+                            parts.Add(ConvertArrayIndexToOffset($"[{inside}]", includeArrayHeader: true).TrimStart().TrimStart('+').Trim());
+                        else
+                            parts.Add(ConvertInlineArrayIndex(inside));
                         continue;
                     }
                     if (MatchField(s, ref i, out var field))
@@ -1306,7 +1308,10 @@ namespace Decompiler.Emitters
                 if (s[i] == '[')
                 {
                     string inside = ReadBracketContent(s, ref i);
-                    parts.Add(ConvertInlineArrayIndex(inside));
+                    if (kind is MemoryKind.Global or MemoryKind.Local)
+                        parts.Add(ConvertArrayIndexToOffset($"[{inside}]", includeArrayHeader: true).TrimStart().TrimStart('+').Trim());
+                    else
+                        parts.Add(ConvertInlineArrayIndex(inside));
                     continue;
                 }
                 i++;
