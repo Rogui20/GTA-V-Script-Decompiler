@@ -243,7 +243,7 @@ namespace Decompiler.Emitters
             string cond = ConvertExpression(node.Condition);
             string incr = ConvertStatement(node.Increment.ToString());
 
-            string pattern = @"^" + Regex.Escape(varName) + @"\s*(<|<=)\s*(.+)$";
+            string pattern = @"^" + Regex.Escape(varName) + @"\s*(<=|<)\s*(.+)$";
             var mCond = Regex.Match(cond, pattern);
             if (!mCond.Success)
                 return false;
