@@ -736,17 +736,17 @@ namespace Decompiler.Emitters
                 string arr2 = m.Groups[4].Value;
                 if (!string.IsNullOrEmpty(arr1))
                 {
-                    expr += ConvertArrayIndexToOffset(arr1);
+                    expr += ConvertArrayIndexToOffset(arr1, includeArrayHeader: true);
                 }
                 if (!string.IsNullOrEmpty(arr2))
                 {
-                    expr += ConvertArrayIndexToOffset(arr2);
+                    expr += ConvertArrayIndexToOffset(arr2, includeArrayHeader: true);
                 }
                 return $"{prefix}[{expr}]";
             });
         }
 
-        private static string ConvertArrayIndexToOffset(string arrToken)
+        private static string ConvertArrayIndexToOffset(string arrToken, bool includeArrayHeader = false)
         {
             var am = Regex.Match(arrToken, @"\[(.*?)\]");
             if (!am.Success)
@@ -757,9 +757,9 @@ namespace Decompiler.Emitters
             {
                 string idx = sm.Groups[1].Value.Trim();
                 string stride = sm.Groups[2].Value.Trim();
-                return $" + ({idx} * {stride})";
+                return includeArrayHeader ? $" + 1 + ({idx} * {stride})" : $" + ({idx} * {stride})";
             }
-            return $" + {inside}";
+            return includeArrayHeader ? $" + 1 + {inside}" : $" + {inside}";
         }
 
         private void EmitFunctionLocals(StringBuilder sb, Function func, int indent, LuaAnalysisContext ctx)
@@ -853,7 +853,7 @@ namespace Decompiler.Emitters
                     int fieldSum = 0;
                     foreach (Match fm in Regex.Matches(m.Groups[4].Value, @"\.f_(\d+)"))
                         fieldSum += int.Parse(fm.Groups[1].Value);
-                    baseExpr = $"{baseIdx + fieldSum}{ConvertArrayIndexToOffset(m.Groups[5].Value)}";
+                    baseExpr = $"{baseIdx + fieldSum}{ConvertArrayIndexToOffset(m.Groups[5].Value, includeArrayHeader: true)}";
                     valueExpr = ConvertStoreNValue(m.Groups[6].Value, countExpr);
                     if (isGlobal && !string.IsNullOrWhiteSpace(countExpr))
                         return $"StoreN(Global, {baseExpr}, {countExpr}, {valueExpr})";
@@ -876,6 +876,31 @@ namespace Decompiler.Emitters
                     int fieldSum = 0;
                     foreach (Match fm in Regex.Matches(mG.Groups[2].Value, @"\.f_(\d+)")) fieldSum += int.Parse(fm.Groups[1].Value);
                     return $"StoreN(Global, {baseIdx + fieldSum}, {countExpr}, {ConvertStoreNValue(mG.Groups[3].Value, countExpr)})";
+                }
+                var mArr = Regex.Match(text, @"^(Global_\d+|[A-Za-z]+Local_\d+)((?:\[[^\]]+\])+)((?:\.f_\d+)*)\s*=\s*\{\s*(.+?)\s*\};$");
+                if (mArr.Success && !string.IsNullOrWhiteSpace(countExpr))
+                {
+                    var baseMatch = Regex.Match(mArr.Groups[1].Value, @"(?:Global|[A-Za-z]+Local)_(\d+)$");
+                    if (baseMatch.Success)
+                    {
+                        int baseIdx = int.Parse(baseMatch.Groups[1].Value);
+                        int fieldSum = 0;
+                        foreach (Match fm in Regex.Matches(mArr.Groups[3].Value, @"\.f_(\d+)"))
+                            fieldSum += int.Parse(fm.Groups[1].Value);
+
+                        string arrOffset = "";
+                        foreach (Match am in Regex.Matches(mArr.Groups[2].Value, @"\[[^\]]+\]"))
+                            arrOffset += ConvertArrayIndexToOffset(am.Value, includeArrayHeader: true);
+
+                        string fullBaseExpr = $"{baseIdx}{arrOffset}";
+                        if (fieldSum != 0)
+                            fullBaseExpr += $" + {fieldSum}";
+
+                        string val = ConvertStoreNValue(mArr.Groups[4].Value, countExpr);
+                        if (mArr.Groups[1].Value.StartsWith("Global_"))
+                            return $"StoreN(Global, {fullBaseExpr}, {countExpr}, {val})";
+                        return $"StoreN(Local, {fullBaseExpr}, {countExpr}, {val})";
+                    }
                 }
             }
             if (baseExpr == null && ptr?.GetType().Name == "LocalLoad")
@@ -915,6 +940,15 @@ namespace Decompiler.Emitters
 
             if (c == "3")
             {
+                var literalTriplet = Regex.Match(expr.Trim(), @"^\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^,]+)\s*$");
+                if (literalTriplet.Success)
+                {
+                    string v1 = ConvertStatement(literalTriplet.Groups[1].Value.Trim());
+                    string v2 = ConvertStatement(literalTriplet.Groups[2].Value.Trim());
+                    string v3 = ConvertStatement(literalTriplet.Groups[3].Value.Trim());
+                    return $"{v1}, {v2}, {v3}";
+                }
+
                 if (vectorLocals.Contains(converted))
                     return $"VecUnpack({converted})";
 
